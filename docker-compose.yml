@@ -1,0 +1,94 @@
+services:
+  bridge:
+    build:
+      context: .
+      dockerfile: trusted/bridge/Dockerfile
+    command:
+      - uvicorn
+      - trusted.bridge.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    environment:
+      RSI_TRUSTED_STATE_DIR: /var/lib/rsi/trusted_state
+      RSI_LITELLM_URL: http://litellm:4000
+      RSI_AGENT_URL: http://agent:8001
+    volumes:
+      - ./runtime/trusted_state:/var/lib/rsi/trusted_state
+    depends_on:
+      litellm:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - agent_net
+      - trusted_net
+
+  litellm:
+    build:
+      context: .
+      dockerfile: trusted/litellm/Dockerfile
+    command:
+      - uvicorn
+      - trusted.litellm.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4000"
+    environment:
+      OPENAI_API_KEY: stage1-sentinel-provider-key
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:4000/healthz", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - trusted_net
+
+  agent:
+    build:
+      context: .
+      dockerfile: untrusted/agent/Dockerfile
+    command:
+      - uvicorn
+      - untrusted.agent.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+    environment:
+      RSI_BRIDGE_URL: http://bridge:8000
+    volumes:
+      - ./untrusted/agent_workspace:/workspace/agent
+    depends_on:
+      bridge:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/healthz", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - agent_net
+
+networks:
+  agent_net:
+    internal: true
+  trusted_net:
+    internal: true
