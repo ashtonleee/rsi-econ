@@ -1,5 +1,15 @@
-# untrusted/agent_workspace
+# agent_workspace
 
-This directory represents the future agent-owned repo/workspace mount.
+This directory is the only mutable seed repo/workspace for Stage 3.
 
-Stage 0 keeps it mostly empty on purpose. The agent container may mount this path, but it must not receive trusted-side state, policy files, secrets, or canonical logs.
+- Inside the container, it is mounted at `/workspace/agent`.
+- The static runtime and harness code lives under `/app/untrusted`.
+- The seed runner may read and write files here, but it must not treat `/app/untrusted` as the self-edit target.
+
+Local validation from inside the agent workspace:
+
+```bash
+python -m pytest -q
+```
+
+Generated run artifacts go under `run_outputs/` and are ignored by git.

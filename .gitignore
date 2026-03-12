@@ -3,3 +3,5 @@
 .venv/
 __pycache__/
 *.egg-info/
+runtime/trusted_state/logs/*.jsonl
+runtime/trusted_state/state/*.json

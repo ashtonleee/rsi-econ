@@ -1,0 +1,27 @@
+[
+  {
+    "kind": "bridge_status"
+  },
+  {
+    "kind": "bridge_chat",
+    "message": "summarize this local-only task: {task}"
+  },
+  {
+    "kind": "write_file",
+    "path": "run_outputs/stage3_report.txt",
+    "content_template": "task: {task}\nbridge_stage: {last_bridge_stage}\nbudget_remaining: {last_bridge_budget_remaining}\nllm_summary: {last_bridge_chat}\n"
+  },
+  {
+    "kind": "run_command",
+    "argv": [
+      "python",
+      "-m",
+      "pytest",
+      "-q"
+    ]
+  },
+  {
+    "kind": "finish",
+    "summary": "scripted local-only task complete"
+  }
+]

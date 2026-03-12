@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rsi-econ"
 version = "0.1.0"
-description = "Stage 0 scaffold and harness for RSI trusted infrastructure."
+description = "Trusted bridge, canonical state, and local-only Stage 3 seed-agent substrate for RSI."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1.0",
@@ -15,6 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+agent = [
+    "pytest>=8.0,<9.0",
+]
 dev = [
     "pytest>=8.0,<9.0",
     "pyyaml>=6.0,<7.0",

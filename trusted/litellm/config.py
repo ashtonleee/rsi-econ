@@ -18,6 +18,6 @@ def litellm_settings() -> LiteLLMSettings:
 
     return LiteLLMSettings(
         service_name="litellm",
-        stage="stage1_hard_boundary",
+        stage="stage3_local_seed_agent",
         provider_api_key=provider_api_key,
     )

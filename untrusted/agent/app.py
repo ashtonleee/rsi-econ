@@ -11,10 +11,15 @@ from untrusted.agent.egress import attempt_egress
 
 def run_startup_checks(app: FastAPI):
     settings = agent_settings()
+    assert settings.workspace_dir != settings.runtime_code_dir
+    settings.workspace_dir.mkdir(parents=True, exist_ok=True)
     app.state.settings = settings
     app.state.startup_checks = {
         "bridge_url_configured": True,
         "bridge_url": settings.bridge_url,
+        "workspace_dir": str(settings.workspace_dir),
+        "runtime_code_dir": str(settings.runtime_code_dir),
+        "self_edit_target": str(settings.workspace_dir),
         "public_probe_url": settings.public_probe_url,
         "provider_probe_url": settings.provider_probe_url,
     }

@@ -9,6 +9,6 @@ COPY pyproject.toml /app/
 COPY shared /app/shared
 COPY untrusted /app/untrusted
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[agent]"
 
 EXPOSE 8001

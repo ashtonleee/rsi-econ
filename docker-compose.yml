@@ -14,6 +14,8 @@ services:
       RSI_TRUSTED_STATE_DIR: /var/lib/rsi/trusted_state
       RSI_LITELLM_URL: http://litellm:4000
       RSI_AGENT_URL: http://agent:8001
+      RSI_LLM_BUDGET_TOKEN_CAP: ${RSI_LLM_BUDGET_TOKEN_CAP:-100}
+      RSI_BUDGET_UNIT: mock_tokens
     volumes:
       - ./runtime/trusted_state:/var/lib/rsi/trusted_state
     depends_on:
@@ -70,6 +72,8 @@ services:
       - "8001"
     environment:
       RSI_BRIDGE_URL: http://bridge:8000
+      RSI_AGENT_WORKSPACE_DIR: /workspace/agent
+      RSI_AGENT_RUNTIME_CODE_DIR: /app/untrusted
     volumes:
       - ./untrusted/agent_workspace:/workspace/agent
     depends_on:
