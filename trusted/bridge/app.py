@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from shared.config import bridge_settings
@@ -17,9 +17,13 @@ from shared.schemas import (
     ChatCompletionResponse,
     ConnectionStatus,
     EgressProbeReport,
+    FetcherFetchResponse,
     HealthReport,
     RecentRequest,
     RecoveryState,
+    WebFetchRequest,
+    WebFetchResponse,
+    WebState,
 )
 from trusted.bridge.clients import TrustedBridgeClients
 from trusted.recovery.store import WorkspaceRecoveryStore
@@ -41,7 +45,7 @@ def build_surfaces() -> dict[str, str]:
         "budgeting": "enforced_token_cap_stage2",
         "seed_agent": "local_only_stage3_substrate",
         "recovery": "trusted_host_checkpoint_controls_stage4",
-        "read_only_web": "stubbed_for_stage_5",
+        "read_only_web": "trusted_fetcher_stage5_read_only_get",
         "browser": "stubbed_for_stage_6",
         "approvals": "stubbed_for_stage_7",
         "consequential_actions": "stubbed_for_stage_8",
@@ -92,8 +96,9 @@ def request_identity() -> tuple[str, str]:
     return uuid4().hex, uuid4().hex
 
 
-async def litellm_connection_payload() -> dict[str, dict]:
+async def trusted_connections_payload() -> dict[str, dict]:
     reachable, detail = await app.state.clients.litellm_health()
+    fetcher_reachable, fetcher_detail = await app.state.clients.fetcher_health()
     checked_at = utc_now_iso()
     return {
         "bridge": {
@@ -106,6 +111,12 @@ async def litellm_connection_payload() -> dict[str, dict]:
             "url": app.state.settings.litellm_url,
             "reachable": reachable,
             "detail": detail,
+            "checked_at": checked_at,
+        },
+        "fetcher": {
+            "url": app.state.settings.fetcher_url,
+            "reachable": fetcher_reachable,
+            "detail": fetcher_detail,
             "checked_at": checked_at,
         },
     }
@@ -124,6 +135,7 @@ def make_status_report(snapshot: dict) -> BridgeStatusReport:
         },
         budget=BudgetState.model_validate(snapshot["budget"]),
         recovery=RecoveryState.model_validate(snapshot["recovery"]),
+        web=WebState.model_validate(snapshot["web"]),
         counters={key: int(value) for key, value in snapshot["counters"].items()},
         recent_requests=[
             RecentRequest.model_validate(payload)
@@ -131,6 +143,26 @@ def make_status_report(snapshot: dict) -> BridgeStatusReport:
         ],
         surfaces=dict(snapshot["surfaces"]),
     )
+
+
+def web_defaults_for(settings) -> dict:
+    return {
+        "fetcher": {
+            "url": settings.fetcher_url,
+            "reachable": False,
+            "detail": "not_checked_yet",
+            "checked_at": None,
+        },
+        "allowlist_hosts": list(settings.web_allowlist_hosts),
+        "private_test_hosts": list(settings.web_private_test_hosts),
+        "allowed_content_types": list(settings.web_allowed_content_types),
+        "caps": {
+            "max_redirects": settings.web_max_redirects,
+            "max_response_bytes": settings.web_max_response_bytes,
+            "max_preview_chars": settings.web_max_preview_chars,
+            "timeout_seconds": settings.web_timeout_seconds,
+        },
+    }
 
 
 def run_startup_checks(app: FastAPI):
@@ -160,9 +192,11 @@ def run_startup_checks(app: FastAPI):
         stage=settings.stage,
         surfaces=app.state.surfaces,
         recovery_defaults=app.state.recovery_store.current_recovery_summary(),
+        web_defaults=web_defaults_for(settings),
     )
     app.state.clients = TrustedBridgeClients(
         litellm_url=settings.litellm_url,
+        fetcher_url=settings.fetcher_url,
         agent_url=settings.agent_url,
     )
     app.state.startup_checks = {
@@ -171,6 +205,7 @@ def run_startup_checks(app: FastAPI):
         "log_path": str(app.state.state_manager.canonical_log_path),
         "operational_state_path": str(app.state.state_manager.operational_state_path),
         "checkpoint_dir": str(settings.checkpoint_dir),
+        "fetcher_url": settings.fetcher_url,
     }
 
 
@@ -211,7 +246,8 @@ async def lifespan(app: FastAPI):
                 "operational_state_path": str(app.state.state_manager.operational_state_path),
             },
             "surfaces": dict(app.state.surfaces),
-            "connections": await litellm_connection_payload(),
+            "connections": await trusted_connections_payload(),
+            "web": web_defaults_for(app.state.settings),
         },
     )
     yield
@@ -222,7 +258,7 @@ app = FastAPI(title="trusted-bridge", lifespan=lifespan)
 
 @app.get("/healthz", response_model=HealthReport)
 async def healthz() -> HealthReport:
-    connections = await litellm_connection_payload()
+    connections = await trusted_connections_payload()
     return HealthReport(
         service=app.state.settings.service_name,
         status="ok",
@@ -231,6 +267,8 @@ async def healthz() -> HealthReport:
             **app.state.startup_checks,
             "litellm_reachable": connections["litellm"]["reachable"],
             "litellm_detail": connections["litellm"]["detail"],
+            "fetcher_reachable": connections["fetcher"]["reachable"],
+            "fetcher_detail": connections["fetcher"]["detail"],
         },
     )
 
@@ -239,7 +277,9 @@ async def healthz() -> HealthReport:
 async def status(request: Request, response: Response) -> BridgeStatusReport:
     request_id, trace_id = request_identity()
     snapshot = app.state.state_manager.snapshot(refresh=True)
-    connections = await litellm_connection_payload()
+    connections = await trusted_connections_payload()
+    status_web = dict(snapshot["web"])
+    status_web["fetcher"] = connections["fetcher"]
     append_event(
         event_type="status_query",
         actor=caller_actor(request, default="operator"),
@@ -256,6 +296,7 @@ async def status(request: Request, response: Response) -> BridgeStatusReport:
                 "checkpoint_dir": str(app.state.settings.checkpoint_dir),
             },
             "recovery": snapshot["recovery"],
+            "web": status_web,
         },
     )
     response.headers.update(make_headers(request_id, trace_id))
@@ -365,7 +406,7 @@ async def chat_completions(
                 "action": "mediated_chat_completion",
                 "model": payload.model,
                 "reason": f"{type(exc).__name__}: {exc}",
-                "connections": await litellm_connection_payload(),
+                "connections": await trusted_connections_payload(),
             },
         )
         return JSONResponse(
@@ -387,7 +428,7 @@ async def chat_completions(
         "total_completion_tokens": snapshot["budget"]["total_completion_tokens"] + result.usage.completion_tokens,
         "total_tokens": snapshot["budget"]["total_tokens"] + result.usage.total_tokens,
     }
-    connections = await litellm_connection_payload()
+    connections = await trusted_connections_payload()
 
     append_event(
         event_type="llm_call",
@@ -423,6 +464,133 @@ async def chat_completions(
         content=result.model_dump(),
     )
     return response
+
+
+def web_event_summary(
+    fetch_result: FetcherFetchResponse,
+    *,
+    outcome: str,
+    reason: str | None = None,
+) -> dict:
+    summary = {
+        "normalized_url": fetch_result.normalized_url,
+        "scheme": fetch_result.scheme,
+        "host": fetch_result.host,
+        "port": fetch_result.port,
+        "allowlist_decision": "allowed" if outcome == "success" else "denied",
+        "resolved_ips": list(fetch_result.resolved_ips),
+        "used_ip": fetch_result.used_ip,
+        "redirect_chain": list(fetch_result.redirect_chain),
+        "http_status": fetch_result.http_status,
+        "content_type": fetch_result.content_type,
+        "byte_count": fetch_result.byte_count,
+        "truncated": fetch_result.truncated,
+        "content_sha256": fetch_result.content_sha256,
+    }
+    if reason:
+        summary["reason"] = reason
+    return summary
+
+
+def web_error_summary(detail: dict) -> dict:
+    return {
+        "normalized_url": detail.get("normalized_url", ""),
+        "scheme": detail.get("scheme", ""),
+        "host": detail.get("host", ""),
+        "port": detail.get("port", 0),
+        "allowlist_decision": "denied",
+        "resolved_ips": list(detail.get("resolved_ips", [])),
+        "used_ip": detail.get("used_ip"),
+        "redirect_chain": list(detail.get("redirect_chain", [])),
+        "http_status": detail.get("http_status"),
+        "content_type": detail.get("content_type"),
+        "byte_count": int(detail.get("byte_count", 0)),
+        "truncated": bool(detail.get("truncated", False)),
+        "content_sha256": detail.get("content_sha256", ""),
+        "reason": detail.get("reason", detail.get("detail", "fetch_failed")),
+    }
+
+
+@app.post("/web/fetch", response_model=WebFetchResponse)
+async def bridge_fetch(
+    payload: WebFetchRequest,
+    request: Request,
+    response: Response,
+) -> WebFetchResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    actor = caller_actor(request, default="agent")
+
+    try:
+        fetch_result = await app.state.clients.fetch_url(payload)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.json()
+        status_code = exc.response.status_code
+        event_type = "web_fetch_denied" if status_code in {400, 403, 415} else "web_fetch_error"
+        append_event(
+            event_type=event_type,
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="denied" if event_type == "web_fetch_denied" else "error",
+            summary=web_error_summary(detail),
+        )
+        return JSONResponse(
+            status_code=status_code,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                **detail,
+            },
+        )
+    except httpx.HTTPError as exc:
+        append_event(
+            event_type="web_fetch_error",
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="error",
+            summary={
+                "normalized_url": payload.url,
+                "scheme": "",
+                "host": "",
+                "port": 0,
+                "allowlist_decision": "unknown",
+                "resolved_ips": [],
+                "used_ip": None,
+                "redirect_chain": [],
+                "http_status": None,
+                "content_type": None,
+                "byte_count": 0,
+                "truncated": False,
+                "content_sha256": "",
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return JSONResponse(
+            status_code=502,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+
+    append_event(
+        event_type="web_fetch",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary=web_event_summary(fetch_result, outcome="success"),
+    )
+    response.headers.update(make_headers(request_id, trace_id))
+    return WebFetchResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **fetch_result.model_dump(),
+    )
 
 
 async def run_probe(probe_kind: str) -> EgressProbeReport | JSONResponse:
@@ -495,6 +663,8 @@ async def run_probe(probe_kind: str) -> EgressProbeReport | JSONResponse:
 async def public_egress_probe(
     response: Response,
 ) -> EgressProbeReport | JSONResponse:
+    if not app.state.settings.enable_debug_probes:
+        raise HTTPException(status_code=404, detail="debug probes disabled")
     result = await run_probe("public")
     if isinstance(result, JSONResponse):
         return result
@@ -506,6 +676,8 @@ async def public_egress_probe(
 async def provider_egress_probe(
     response: Response,
 ) -> EgressProbeReport | JSONResponse:
+    if not app.state.settings.enable_debug_probes:
+        raise HTTPException(status_code=404, detail="debug probes disabled")
     result = await run_probe("provider")
     if isinstance(result, JSONResponse):
         return result

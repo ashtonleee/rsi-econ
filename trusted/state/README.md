@@ -17,4 +17,10 @@ Stage 4 adds trusted/operator-origin recovery events:
 - `workspace_reset`
 - `recovery_error`
 
-Only trusted services and trusted host-side operator scripts write these files. The agent sees them only through bridge read-only status surfaces and the narrow append-only run-report endpoint.
+Stage 5 adds trusted-observed web fetch events:
+
+- `web_fetch`
+- `web_fetch_denied`
+- `web_fetch_error`
+
+Only trusted services and trusted host-side operator scripts write these files. The agent sees them only through bridge read-only status surfaces, the narrow append-only run-report endpoint, and the safe bridge-owned `/web/fetch` route.

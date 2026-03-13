@@ -1,8 +1,8 @@
 # rsi-econ
 
-Stage 4 only: trusted workspace recovery and rollback on top of the validated Stage 1/2 boundary, canonical trusted state, and the local-only seed agent substrate.
+Stage 5 only: trusted read-only web mediation on top of the validated Stage 1-4 boundary, canonical trusted state, recovery, and the local-only seed agent substrate.
 
-This repo does not implement public-web proxying, browser automation, approvals, consequential actions, or operator auth on the bridge yet. It now proves the boundary, the trusted-side control plane, the local-only seed-agent loop, and trusted host-side recovery for `/workspace/agent`:
+This repo does not implement browser automation, JS execution, sessions/logins, approvals, consequential actions, or operator auth on the bridge yet. It now proves:
 
 - the untrusted agent only sits on an internal Docker network
 - the bridge is the only cross-network hop
@@ -15,6 +15,8 @@ This repo does not implement public-web proxying, browser automation, approvals,
 - `/app/untrusted` stays static runtime/harness code
 - the seed runner can use bridge status, bridge chat, local workspace file tools, and a bounded local Python command runner
 - trusted checkpoints and reset/restore controls live outside the mutable workspace under `runtime/trusted_state/checkpoints/`
+- read-only web fetches go only through `agent -> bridge -> fetcher -> egress_net`
+- the fetch route is fixed to remote `GET` only with an explicit host allowlist, text-only content policy, redirect caps, byte caps, and canonical trusted fetch logging
 
 ## Install
 
@@ -30,7 +32,7 @@ pip install -e ".[dev]"
 ./scripts/test.sh
 ```
 
-That command is the primary verification path for Stage 4. It requires the Docker daemon because the boundary proof, trusted-state proof, seed-runner proof, and recovery proof are all container-backed.
+That command is the primary verification path for Stage 5. It requires the Docker daemon because the boundary proof, trusted-state proof, recovery proof, seed-runner proof, and mediated web-fetch proof are all container-backed.
 
 ## Docker Workflow
 
@@ -64,6 +66,12 @@ Query the same read-only trusted status surface from inside the untrusted sandbo
 docker compose exec agent python -m untrusted.agent.bridge_client status
 ```
 
+Fetch an allowlisted page through the trusted web path:
+
+```bash
+docker compose exec agent python -m untrusted.agent.bridge_client fetch --url http://example.com/
+```
+
 Run the one-shot local-only seed runner inside the untrusted sandbox:
 
 ```bash
@@ -74,6 +82,18 @@ Run the deterministic scripted Stage 3 plan used by the integration test:
 
 ```bash
 docker compose exec agent python -m untrusted.agent.seed_runner --task "write a local-only run report" --planner scripted --script .seed_plans/stage3_local_task.json
+```
+
+Run the human-visible Stage 5 demo artifact path:
+
+```bash
+docker compose exec agent python -m untrusted.agent.seed_runner --task "fetch one allowed public page and write a report" --planner scripted --script .seed_plans/stage5_demo_fetch.json
+```
+
+Inspect the demo report artifact:
+
+```bash
+cat untrusted/agent_workspace/reports/stage5_web_fetch_report.txt
 ```
 
 Tail trusted service logs:
@@ -88,7 +108,13 @@ Tail the canonical append-only event log:
 tail -f runtime/trusted_state/logs/bridge_events.jsonl
 ```
 
-Inspect the materialized operational state snapshot:
+Inspect only the canonical Stage 5 fetch events:
+
+```bash
+rg '"event_type": "web_fetch|web_fetch_denied|web_fetch_error"' runtime/trusted_state/logs/bridge_events.jsonl
+```
+
+Inspect the materialized operational state snapshot, including the new `web` section:
 
 ```bash
 python -m json.tool runtime/trusted_state/state/operational_state.json
@@ -132,7 +158,7 @@ Tear the stack down:
 
 ## Host-Process Dev Fallback
 
-This mode is for lightweight app debugging only. It is not the Stage 4 trust proof path.
+This mode is for lightweight app debugging only. It is not the Stage 5 trust proof path.
 
 Run LiteLLM in one shell:
 
@@ -192,6 +218,17 @@ rm -rf runtime/trusted_state/checkpoints
 - Recovery actions are canonical trusted events with durable request IDs and trace IDs.
 - Bridge `/status` exposes read-only recovery state derived from the canonical log and the trusted checkpoint store.
 
+## Stage 5 Web Model
+
+- New topology edge: `fetcher` is a separate trusted service on `trusted_net` + `egress_net`.
+- `bridge` stays off `egress_net`; it calls `fetcher` over `trusted_net`.
+- `agent` stays on `agent_net` only and still has no direct public/provider/LiteLLM/fetcher path.
+- The bridge exposes one new safe route: `POST /web/fetch`.
+- Remote fetches are fixed to `GET` only.
+- Allowed by default: allowlisted `http`/`https` URLs with default ports and text-oriented content types.
+- Forbidden in Stage 5: non-HTTP(S), fragments, userinfo, arbitrary ports, cookies, sessions, auth headers, binary/media downloads, and browser/JS behavior.
+- Canonical fetch events record trusted-observed metadata only. Raw fetched bodies stay out of canonical trusted state.
+
 ## Stage Boundary
 
 - Trusted code lives under `trusted/`.
@@ -201,6 +238,8 @@ rm -rf runtime/trusted_state/checkpoints
 - The agent service mounts only `untrusted/agent_workspace/`.
 - The agent is on `agent_net` only.
 - LiteLLM is on `trusted_net` only.
-- The bridge is the only service on both networks.
+- The bridge is on `agent_net` + `trusted_net`.
+- The fetcher is on `trusted_net` + `egress_net`.
+- The web fixture used by deterministic tests is on `egress_net` only.
 
 See `REPO_LAYOUT.md`, `TASK_GRAPH.md`, and `ACCEPTANCE_TEST_MATRIX.md` for the current stage contract.

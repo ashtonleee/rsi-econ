@@ -16,6 +16,8 @@ from shared.schemas import (
     ConnectionStatus,
     RecentRequest,
     RecoveryState,
+    WebFetchResponse,
+    WebState,
 )
 from untrusted.agent.command_runner import BoundedCommandRunner
 from untrusted.agent.seed_runner import PlanAction, ScriptedPlanner, SeedRunner
@@ -26,13 +28,14 @@ class FakeBridgeClient:
     def __init__(self):
         self.status_calls = 0
         self.chat_calls = 0
+        self.fetch_calls = 0
         self.reported_events: list[dict] = []
 
     async def status(self) -> BridgeStatusReport:
         self.status_calls += 1
         return BridgeStatusReport(
             service="bridge",
-            stage="stage4_workspace_recovery",
+            stage="stage5_read_only_web",
             trusted_state_dir="/var/lib/rsi/trusted_state",
             log_path="/var/lib/rsi/trusted_state/logs/bridge_events.jsonl",
             operational_state_path="/var/lib/rsi/trusted_state/state/operational_state.json",
@@ -42,7 +45,13 @@ class FakeBridgeClient:
                     reachable=True,
                     detail=None,
                     checked_at="2026-03-12T00:00:00+00:00",
-                )
+                ),
+                "fetcher": ConnectionStatus(
+                    url="http://fetcher:8082",
+                    reachable=True,
+                    detail=None,
+                    checked_at="2026-03-12T00:00:00+00:00",
+                ),
             },
             budget=BudgetState(
                 unit="mock_tokens",
@@ -65,6 +74,30 @@ class FakeBridgeClient:
                 latest_checkpoint_id=None,
                 latest_action=None,
                 current_workspace_status="seed_baseline",
+            ),
+            web=WebState(
+                fetcher=ConnectionStatus(
+                    url="http://fetcher:8082",
+                    reachable=True,
+                    detail=None,
+                    checked_at="2026-03-12T00:00:00+00:00",
+                ),
+                allowlist_hosts=["example.com"],
+                private_test_hosts=[],
+                allowed_content_types=["text/plain", "text/html"],
+                caps={
+                    "max_redirects": 3,
+                    "max_response_bytes": 32768,
+                    "max_preview_chars": 1024,
+                    "timeout_seconds": 5.0,
+                },
+                counters={
+                    "web_fetch_total": 0,
+                    "web_fetch_success": 0,
+                    "web_fetch_denied": 0,
+                    "web_fetch_errors": 0,
+                },
+                recent_fetches=[],
             ),
             counters={"status_queries": 1, "llm_calls_total": 1},
             recent_requests=[
@@ -115,6 +148,28 @@ class FakeBridgeClient:
             request_id=f"req-{len(self.reported_events)}",
             trace_id=f"trace-{len(self.reported_events)}",
             outcome="recorded",
+        )
+
+    async def fetch(self, *, url: str) -> WebFetchResponse:
+        self.fetch_calls += 1
+        return WebFetchResponse(
+            request_id="fetch-req-1",
+            trace_id="fetch-trace-1",
+            url=url,
+            normalized_url=url,
+            final_url=url,
+            scheme="https",
+            host="example.com",
+            port=443,
+            http_status=200,
+            content_type="text/html",
+            byte_count=24,
+            truncated=False,
+            redirect_chain=[],
+            resolved_ips=["93.184.216.34"],
+            used_ip="93.184.216.34",
+            content_sha256="hash",
+            text="example preview text",
         )
 
 
@@ -236,3 +291,45 @@ def test_scripted_planner_completes_local_task_end_to_end(tmp_path):
     assert payload["task"] == "fix the local add helper"
     assert any(step["kind"] == "bridge_status" for step in payload["steps"])
     assert any(step["kind"] == "bridge_chat" for step in payload["steps"])
+
+
+def test_scripted_planner_can_fetch_via_bridge_and_write_report(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    make_local_task_workspace(workspace_dir)
+
+    bridge = FakeBridgeClient()
+    planner = ScriptedPlanner(
+        [
+            PlanAction(kind="bridge_fetch", params={"url": "https://example.com/"}),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "reports/web_fetch.txt",
+                    "content_template": (
+                        "url={last_web_fetch_url}\n"
+                        "request_id={last_web_fetch_request_id}\n"
+                        "trace_id={last_web_fetch_trace_id}\n"
+                        "preview={last_web_fetch_preview}\n"
+                    ),
+                },
+            ),
+            PlanAction(kind="finish", params={"summary": "fetch complete"}),
+        ]
+    )
+    runner = SeedRunner(
+        workspace_dir=workspace_dir,
+        bridge_client=bridge,
+        planner=planner,
+        max_steps=4,
+    )
+
+    result = asyncio.run(runner.run("fetch one page"))
+
+    assert result.success is True
+    assert bridge.fetch_calls == 1
+    report = workspace_dir / "reports" / "web_fetch.txt"
+    assert report.exists()
+    payload = report.read_text(encoding="ascii")
+    assert "https://example.com/" in payload
+    assert "fetch-req-1" in payload
+    assert "example preview text" in payload

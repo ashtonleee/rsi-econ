@@ -18,6 +18,7 @@ def docker_env() -> dict[str, str]:
     env = os.environ.copy()
     env["COMPOSE_PROJECT_NAME"] = COMPOSE_PROJECT
     env["RSI_LLM_BUDGET_TOKEN_CAP"] = str(BUDGET_CAP)
+    env["RSI_ENABLE_DEBUG_PROBES"] = "1"
     return env
 
 

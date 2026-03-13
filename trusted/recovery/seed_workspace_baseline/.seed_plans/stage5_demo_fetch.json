@@ -1,0 +1,18 @@
+[
+  {
+    "kind": "bridge_status"
+  },
+  {
+    "kind": "bridge_fetch",
+    "url": "http://example.com/"
+  },
+  {
+    "kind": "write_file",
+    "path": "reports/stage5_web_fetch_report.txt",
+    "content_template": "task={task}\nurl={last_web_fetch_url}\nrequest_id={last_web_fetch_request_id}\ntrace_id={last_web_fetch_trace_id}\npreview={last_web_fetch_preview}\n"
+  },
+  {
+    "kind": "finish",
+    "summary": "stage5 public fetch demo complete"
+  }
+]

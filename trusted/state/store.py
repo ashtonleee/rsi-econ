@@ -33,6 +33,7 @@ class TrustedStateManager:
         stage: str,
         surfaces: dict[str, str],
         recovery_defaults: dict[str, Any] | None = None,
+        web_defaults: dict[str, Any] | None = None,
         recent_limit: int = 12,
     ):
         self.canonical_log_path = canonical_log_path
@@ -42,6 +43,7 @@ class TrustedStateManager:
         self.stage = stage
         self.surfaces = dict(surfaces)
         self.recovery_defaults = json.loads(json.dumps(recovery_defaults or {}))
+        self.web_defaults = json.loads(json.dumps(web_defaults or {}))
         self.recent_limit = recent_limit
         self._snapshot = self._initial_snapshot()
         self._rebuild_from_log()
@@ -71,6 +73,10 @@ class TrustedStateManager:
                 "budget_updates": 0,
                 "checkpoint_events": 0,
                 "recovery_errors": 0,
+                "web_fetch_total": 0,
+                "web_fetch_success": 0,
+                "web_fetch_denied": 0,
+                "web_fetch_errors": 0,
                 "status_queries": 0,
                 "system_events": 0,
                 "agent_run_events": 0,
@@ -87,6 +93,15 @@ class TrustedStateManager:
                     "reachable": False,
                     "detail": "not_checked_yet",
                     "checked_at": None,
+                },
+                "fetcher": {
+                    "url": self.web_defaults.get("fetcher", {}).get("url", "http://fetcher:8082"),
+                    "reachable": self.web_defaults.get("fetcher", {}).get("reachable", False),
+                    "detail": self.web_defaults.get("fetcher", {}).get(
+                        "detail",
+                        "not_checked_yet",
+                    ),
+                    "checked_at": self.web_defaults.get("fetcher", {}).get("checked_at"),
                 },
             },
             "recovery": {
@@ -106,6 +121,32 @@ class TrustedStateManager:
                     "current_workspace_status",
                     "seed_baseline",
                 ),
+            },
+            "web": {
+                "fetcher": dict(
+                    self.web_defaults.get(
+                        "fetcher",
+                        {
+                            "url": "http://fetcher:8082",
+                            "reachable": False,
+                            "detail": "not_checked_yet",
+                            "checked_at": None,
+                        },
+                    )
+                ),
+                "allowlist_hosts": list(self.web_defaults.get("allowlist_hosts", [])),
+                "private_test_hosts": list(self.web_defaults.get("private_test_hosts", [])),
+                "allowed_content_types": list(
+                    self.web_defaults.get("allowed_content_types", [])
+                ),
+                "caps": dict(self.web_defaults.get("caps", {})),
+                "counters": {
+                    "web_fetch_total": 0,
+                    "web_fetch_success": 0,
+                    "web_fetch_denied": 0,
+                    "web_fetch_errors": 0,
+                },
+                "recent_fetches": [],
             },
             "recent_requests": [],
             "last_event_timestamp": None,
@@ -131,6 +172,8 @@ class TrustedStateManager:
             )
             current.update(payload)
             self._snapshot["connections"][name] = current
+            if name == "fetcher":
+                self._snapshot["web"]["fetcher"] = dict(current)
 
     def _apply_budget_update(self, summary: dict[str, Any]):
         budget = self._snapshot["budget"]
@@ -191,6 +234,43 @@ class TrustedStateManager:
             recovery["current_workspace_status"],
         )
 
+    def _apply_web_defaults(self, summary: dict[str, Any]):
+        web_payload = summary.get("web", {})
+        if not web_payload:
+            return
+
+        web = self._snapshot["web"]
+        if "fetcher" in web_payload:
+            web["fetcher"] = dict(web_payload["fetcher"])
+        if "allowlist_hosts" in web_payload:
+            web["allowlist_hosts"] = list(web_payload["allowlist_hosts"])
+        if "private_test_hosts" in web_payload:
+            web["private_test_hosts"] = list(web_payload["private_test_hosts"])
+        if "allowed_content_types" in web_payload:
+            web["allowed_content_types"] = list(web_payload["allowed_content_types"])
+        if "caps" in web_payload:
+            web["caps"] = dict(web_payload["caps"])
+
+    def _push_recent_fetch(self, event: dict[str, Any]):
+        summary = event["summary"]
+        fetches = self._snapshot["web"]["recent_fetches"]
+        fetches.insert(
+            0,
+            {
+                "timestamp": event["timestamp"],
+                "request_id": event["request_id"],
+                "trace_id": event["trace_id"],
+                "outcome": event["outcome"],
+                "normalized_url": summary.get("normalized_url", ""),
+                "host": summary.get("host", ""),
+                "http_status": summary.get("http_status"),
+                "content_type": summary.get("content_type"),
+                "byte_count": int(summary.get("byte_count", 0)),
+                "truncated": bool(summary.get("truncated", False)),
+            },
+        )
+        del fetches[self.recent_limit :]
+
     def _push_recent_request(self, event: dict[str, Any]):
         recent = self._snapshot["recent_requests"]
         recent.insert(
@@ -231,6 +311,24 @@ class TrustedStateManager:
         elif event_type == "recovery_error":
             self._snapshot["counters"]["recovery_errors"] += 1
             self._apply_recovery_update(summary)
+        elif event_type == "web_fetch":
+            self._snapshot["counters"]["web_fetch_total"] += 1
+            self._snapshot["counters"]["web_fetch_success"] += 1
+            self._snapshot["web"]["counters"]["web_fetch_total"] += 1
+            self._snapshot["web"]["counters"]["web_fetch_success"] += 1
+            self._push_recent_fetch(event)
+        elif event_type == "web_fetch_denied":
+            self._snapshot["counters"]["web_fetch_total"] += 1
+            self._snapshot["counters"]["web_fetch_denied"] += 1
+            self._snapshot["web"]["counters"]["web_fetch_total"] += 1
+            self._snapshot["web"]["counters"]["web_fetch_denied"] += 1
+            self._push_recent_fetch(event)
+        elif event_type == "web_fetch_error":
+            self._snapshot["counters"]["web_fetch_total"] += 1
+            self._snapshot["counters"]["web_fetch_errors"] += 1
+            self._snapshot["web"]["counters"]["web_fetch_total"] += 1
+            self._snapshot["web"]["counters"]["web_fetch_errors"] += 1
+            self._push_recent_fetch(event)
         elif event_type == "status_query":
             self._snapshot["counters"]["status_queries"] += 1
         elif event_type == "agent_run":
@@ -243,6 +341,7 @@ class TrustedStateManager:
         surfaces = summary.get("surfaces")
         if surfaces:
             self._snapshot["surfaces"].update(surfaces)
+        self._apply_web_defaults(summary)
 
     def _write_snapshot(self):
         _write_json_atomic(self.operational_state_path, self._snapshot)
