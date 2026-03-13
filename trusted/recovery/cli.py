@@ -4,7 +4,7 @@ import sys
 from uuid import uuid4
 
 from shared.config import agent_settings, bridge_settings
-from trusted.bridge.app import build_surfaces, log_path_for, state_path_for
+from trusted.bridge.app import build_surfaces, log_path_for, state_path_for, web_defaults_for
 from trusted.recovery.store import WorkspaceRecoveryStore
 from trusted.state.store import TrustedStateManager
 
@@ -29,6 +29,7 @@ def build_state_manager(store: WorkspaceRecoveryStore) -> TrustedStateManager:
         stage=settings.stage,
         surfaces=build_surfaces(),
         recovery_defaults=store.current_recovery_summary(),
+        web_defaults=web_defaults_for(settings),
     )
 
 
@@ -137,7 +138,7 @@ def command_reset_workspace(_args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Trusted Stage 4 workspace recovery controls")
+    parser = argparse.ArgumentParser(description="Trusted workspace recovery controls")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create = subparsers.add_parser("create-checkpoint")

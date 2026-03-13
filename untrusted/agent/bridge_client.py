@@ -13,6 +13,8 @@ from shared.schemas import (
     ChatCompletionResponse,
     ChatMessage,
     HealthReport,
+    WebFetchRequest,
+    WebFetchResponse,
 )
 
 
@@ -46,6 +48,17 @@ class BridgeClient:
             )
             response.raise_for_status()
         return ChatCompletionResponse.model_validate(response.json())
+
+    async def fetch(self, *, url: str) -> WebFetchResponse:
+        payload = WebFetchRequest(url=url)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=10.0) as client:
+            response = await client.post(
+                "/web/fetch",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return WebFetchResponse.model_validate(response.json())
 
     async def report_agent_event(
         self,
@@ -94,6 +107,9 @@ def main():
     chat_parser.add_argument("--model", default="stage1-deterministic")
     chat_parser.add_argument("--message", required=True)
 
+    fetch_parser = subparsers.add_parser("fetch")
+    fetch_parser.add_argument("--url", required=True)
+
     args = parser.parse_args()
     if args.command in (None, "health"):
         result = asyncio.run(probe_bridge(args.bridge_url))
@@ -105,6 +121,10 @@ def main():
                 model=args.model,
                 message=args.message,
             )
+        ).model_dump()
+    elif args.command == "fetch":
+        result = asyncio.run(
+            BridgeClient(args.bridge_url).fetch(url=args.url)
         ).model_dump()
     else:
         raise ValueError(f"unsupported command: {args.command}")

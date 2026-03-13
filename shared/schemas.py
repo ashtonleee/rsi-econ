@@ -73,6 +73,29 @@ class RecoveryState(BaseModel):
     current_workspace_status: str
 
 
+class WebFetchRecord(BaseModel):
+    timestamp: str
+    request_id: str
+    trace_id: str
+    outcome: str
+    normalized_url: str
+    host: str
+    http_status: int | None = None
+    content_type: str | None = None
+    byte_count: int = 0
+    truncated: bool = False
+
+
+class WebState(BaseModel):
+    fetcher: ConnectionStatus
+    allowlist_hosts: list[str]
+    private_test_hosts: list[str]
+    allowed_content_types: list[str]
+    caps: dict[str, int | float]
+    counters: dict[str, int]
+    recent_fetches: list[WebFetchRecord]
+
+
 class BridgeStatusReport(BaseModel):
     service: str
     stage: str
@@ -82,6 +105,7 @@ class BridgeStatusReport(BaseModel):
     connections: dict[str, ConnectionStatus]
     budget: BudgetState
     recovery: RecoveryState
+    web: WebState
     counters: dict[str, int]
     recent_requests: list[RecentRequest]
     surfaces: dict[str, str]
@@ -151,3 +175,29 @@ class AgentRunEventReceipt(BaseModel):
     request_id: str
     trace_id: str
     outcome: Literal["recorded"]
+
+
+class WebFetchRequest(BaseModel):
+    url: str
+
+
+class FetcherFetchResponse(BaseModel):
+    normalized_url: str
+    final_url: str
+    scheme: Literal["http", "https"]
+    host: str
+    port: int
+    http_status: int
+    content_type: str
+    byte_count: int
+    truncated: bool
+    redirect_chain: list[str]
+    resolved_ips: list[str]
+    used_ip: str | None = None
+    content_sha256: str
+    text: str
+
+
+class WebFetchResponse(FetcherFetchResponse):
+    request_id: str
+    trace_id: str

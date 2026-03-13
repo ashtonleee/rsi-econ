@@ -13,13 +13,20 @@ services:
     environment:
       RSI_TRUSTED_STATE_DIR: /var/lib/rsi/trusted_state
       RSI_LITELLM_URL: http://litellm:4000
+      RSI_FETCHER_URL: http://fetcher:8082
       RSI_AGENT_URL: http://agent:8001
       RSI_LLM_BUDGET_TOKEN_CAP: ${RSI_LLM_BUDGET_TOKEN_CAP:-100}
       RSI_BUDGET_UNIT: mock_tokens
+      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
+      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
+      RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
+      RSI_ENABLE_DEBUG_PROBES: ${RSI_ENABLE_DEBUG_PROBES:-0}
     volumes:
       - ./runtime/trusted_state:/var/lib/rsi/trusted_state
     depends_on:
       litellm:
+        condition: service_healthy
+      fetcher:
         condition: service_healthy
     healthcheck:
       test:
@@ -59,6 +66,38 @@ services:
     networks:
       - trusted_net
 
+  fetcher:
+    build:
+      context: .
+      dockerfile: trusted/fetcher/Dockerfile
+    command:
+      - uvicorn
+      - trusted.fetcher.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8082"
+    environment:
+      RSI_FETCHER_URL: http://fetcher:8082
+      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
+      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
+      RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
+    depends_on:
+      webfixture:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8082/healthz", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - trusted_net
+      - egress_net
+
   agent:
     build:
       context: .
@@ -91,8 +130,37 @@ services:
     networks:
       - agent_net
 
+  webfixture:
+    build:
+      context: .
+      dockerfile: tests/fixtures/webfixture/Dockerfile
+    command:
+      - uvicorn
+      - app:app
+      - --app-dir
+      - /app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "80"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1/healthz", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      egress_net:
+        aliases:
+          - allowed.test
+          - blocked.test
+
 networks:
   agent_net:
     internal: true
   trusted_net:
     internal: true
+  egress_net: {}

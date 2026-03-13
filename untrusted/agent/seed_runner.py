@@ -82,10 +82,12 @@ class RunState:
     steps: list[dict[str, Any]] = field(default_factory=list)
     last_bridge_status: dict[str, Any] | None = None
     last_bridge_chat: dict[str, Any] | None = None
+    last_web_fetch: dict[str, Any] | None = None
 
     def template_context(self) -> dict[str, Any]:
         status = self.last_bridge_status or {}
         chat = self.last_bridge_chat or {}
+        fetch = self.last_web_fetch or {}
         return {
             "task": self.task,
             "run_id": self.run_id,
@@ -94,6 +96,10 @@ class RunState:
             "last_bridge_stage": status.get("stage", ""),
             "last_bridge_budget_remaining": status.get("budget_remaining", ""),
             "last_bridge_chat": chat.get("message", ""),
+            "last_web_fetch_url": fetch.get("url", ""),
+            "last_web_fetch_request_id": fetch.get("request_id", ""),
+            "last_web_fetch_trace_id": fetch.get("trace_id", ""),
+            "last_web_fetch_preview": fetch.get("preview", ""),
         }
 
 
@@ -149,6 +155,20 @@ class SeedRunner:
             summary=summary,
         )
 
+    def _reportable_result(self, action_kind: str, result: dict[str, Any]) -> dict[str, Any]:
+        if action_kind != "bridge_fetch":
+            return result
+        return {
+            "request_id": result["request_id"],
+            "trace_id": result["trace_id"],
+            "normalized_url": result["normalized_url"],
+            "final_url": result["final_url"],
+            "http_status": result["http_status"],
+            "content_type": result["content_type"],
+            "byte_count": result["byte_count"],
+            "truncated": result["truncated"],
+        }
+
     async def _execute_action(self, action: PlanAction, state: RunState) -> dict[str, Any]:
         if action.kind == "bridge_status":
             status = await self.bridge_client.status()
@@ -172,6 +192,26 @@ class SeedRunner:
                 "message": content,
                 "model": response.model,
                 "usage": response.usage.model_dump(),
+            }
+
+        if action.kind == "bridge_fetch":
+            response = await self.bridge_client.fetch(url=action.params["url"])
+            state.last_web_fetch = {
+                "url": response.final_url,
+                "request_id": response.request_id,
+                "trace_id": response.trace_id,
+                "preview": response.text[:200],
+            }
+            return {
+                "request_id": response.request_id,
+                "trace_id": response.trace_id,
+                "normalized_url": response.normalized_url,
+                "final_url": response.final_url,
+                "http_status": response.http_status,
+                "content_type": response.content_type,
+                "byte_count": response.byte_count,
+                "truncated": response.truncated,
+                "content_preview": response.text[:200],
             }
 
         if action.kind == "list_files":
@@ -268,7 +308,7 @@ class SeedRunner:
                     summary={
                         "reported_origin": "untrusted_agent",
                         "step_kind": action.kind,
-                        "result": result,
+                        "result": self._reportable_result(action.kind, result),
                     },
                 )
                 if action.kind == "run_command":

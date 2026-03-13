@@ -18,6 +18,6 @@ def litellm_settings() -> LiteLLMSettings:
 
     return LiteLLMSettings(
         service_name="litellm",
-        stage="stage4_workspace_recovery",
+        stage="stage5_read_only_web",
         provider_api_key=provider_api_key,
     )
