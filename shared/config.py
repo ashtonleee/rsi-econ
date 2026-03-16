@@ -12,6 +12,7 @@ DEFAULT_BRIDGE_URL = "http://bridge:8000"
 DEFAULT_LITELLM_URL = "http://litellm:4000"
 DEFAULT_FETCHER_URL = "http://fetcher:8082"
 DEFAULT_BROWSER_URL = "http://browser:8083"
+DEFAULT_EGRESS_URL = "http://egress:8084"
 DEFAULT_AGENT_URL = "http://agent:8001"
 DEFAULT_AGENT_WORKSPACE_DIR = ROOT / "untrusted" / "agent_workspace"
 DEFAULT_AGENT_RUNTIME_CODE_DIR = ROOT / "untrusted"
@@ -61,6 +62,23 @@ def _env_flag(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _csv_mapping(raw: str | None) -> dict[str, tuple[str, ...]]:
+    if raw is None or raw.strip() == "":
+        return {}
+    entries: dict[str, tuple[str, ...]] = {}
+    for pair in raw.split(";"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        host, sep, values = pair.partition("=")
+        if not sep:
+            continue
+        ips = tuple(item.strip() for item in values.split("|") if item.strip())
+        if ips:
+            entries[host.strip().lower()] = ips
+    return entries
+
+
 @dataclass(frozen=True)
 class BridgeSettings:
     service_name: str
@@ -73,6 +91,7 @@ class BridgeSettings:
     litellm_url: str
     fetcher_url: str
     browser_url: str
+    egress_url: str
     agent_url: str
     llm_budget_token_cap: int
     budget_unit: str
@@ -100,6 +119,7 @@ class BrowserSettings:
     service_name: str
     stage: str
     browser_url: str
+    egress_url: str
     allowlist_hosts: tuple[str, ...]
     private_test_hosts: tuple[str, ...]
     max_redirects: int
@@ -119,6 +139,7 @@ class FetcherSettings:
     service_name: str
     stage: str
     fetcher_url: str
+    egress_url: str
     allowlist_hosts: tuple[str, ...]
     private_test_hosts: tuple[str, ...]
     allowed_content_types: tuple[str, ...]
@@ -139,6 +160,21 @@ class AgentSettings:
     runtime_code_dir: Path
     public_probe_url: str
     provider_probe_url: str
+
+
+@dataclass(frozen=True)
+class EgressSettings:
+    service_name: str
+    stage: str
+    egress_url: str
+    allowlist_hosts: tuple[str, ...]
+    private_test_hosts: tuple[str, ...]
+    timeout_seconds: float
+    allowed_content_types: tuple[str, ...]
+    user_agent: str
+    max_redirects: int
+    enable_private_test_hosts: bool
+    test_ip_overrides: dict[str, tuple[str, ...]]
 
 
 def bridge_settings() -> BridgeSettings:
@@ -260,6 +296,7 @@ def bridge_settings() -> BridgeSettings:
         litellm_url=os.environ.get("RSI_LITELLM_URL", DEFAULT_LITELLM_URL).strip(),
         fetcher_url=os.environ.get("RSI_FETCHER_URL", DEFAULT_FETCHER_URL).strip(),
         browser_url=os.environ.get("RSI_BROWSER_URL", DEFAULT_BROWSER_URL).strip(),
+        egress_url=os.environ.get("RSI_EGRESS_URL", DEFAULT_EGRESS_URL).strip(),
         agent_url=os.environ.get("RSI_AGENT_URL", DEFAULT_AGENT_URL).strip(),
         llm_budget_token_cap=llm_budget_token_cap,
         budget_unit=os.environ.get("RSI_BUDGET_UNIT", DEFAULT_BUDGET_UNIT).strip(),
@@ -324,6 +361,7 @@ def fetcher_settings() -> FetcherSettings:
         service_name="fetcher",
         stage="stage6_read_only_browser",
         fetcher_url=os.environ.get("RSI_FETCHER_URL", DEFAULT_FETCHER_URL).strip(),
+        egress_url=os.environ.get("RSI_EGRESS_URL", DEFAULT_EGRESS_URL).strip(),
         allowlist_hosts=_split_csv(
             os.environ.get("RSI_WEB_ALLOWLIST_HOSTS"),
             DEFAULT_WEB_ALLOWLIST_HOSTS,
@@ -410,6 +448,7 @@ def browser_settings() -> BrowserSettings:
         service_name="browser",
         stage="stage6_read_only_browser",
         browser_url=os.environ.get("RSI_BROWSER_URL", DEFAULT_BROWSER_URL).strip(),
+        egress_url=os.environ.get("RSI_EGRESS_URL", DEFAULT_EGRESS_URL).strip(),
         allowlist_hosts=_split_csv(
             os.environ.get("RSI_WEB_ALLOWLIST_HOSTS"),
             DEFAULT_WEB_ALLOWLIST_HOSTS,
@@ -463,4 +502,49 @@ def agent_settings() -> AgentSettings:
             "RSI_PROVIDER_PROBE_URL",
             DEFAULT_PROVIDER_PROBE_URL,
         ).strip(),
+    )
+
+
+def egress_settings() -> EgressSettings:
+    web_max_redirects = int(
+        os.environ.get(
+            "RSI_WEB_MAX_REDIRECTS",
+            str(DEFAULT_WEB_MAX_REDIRECTS),
+        ).strip()
+    )
+    web_timeout_seconds = float(
+        os.environ.get(
+            "RSI_WEB_TIMEOUT_SECONDS",
+            str(DEFAULT_WEB_TIMEOUT_SECONDS),
+        ).strip()
+    )
+    assert web_max_redirects >= 0
+    assert web_timeout_seconds > 0
+    return EgressSettings(
+        service_name="egress",
+        stage="stage6_read_only_browser",
+        egress_url=os.environ.get("RSI_EGRESS_URL", DEFAULT_EGRESS_URL).strip(),
+        allowlist_hosts=_split_csv(
+            os.environ.get("RSI_WEB_ALLOWLIST_HOSTS"),
+            DEFAULT_WEB_ALLOWLIST_HOSTS,
+        ),
+        private_test_hosts=_split_csv(
+            os.environ.get("RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"),
+            (),
+        ),
+        timeout_seconds=web_timeout_seconds,
+        allowed_content_types=_split_csv(
+            os.environ.get("RSI_FETCH_ALLOWED_CONTENT_TYPES"),
+            DEFAULT_FETCH_ALLOWED_CONTENT_TYPES,
+        ),
+        user_agent=os.environ.get(
+            "RSI_FETCH_USER_AGENT",
+            DEFAULT_FETCH_USER_AGENT,
+        ).strip(),
+        max_redirects=web_max_redirects,
+        enable_private_test_hosts=_env_flag(
+            "RSI_FETCH_ENABLE_PRIVATE_TEST_HOSTS",
+            default=True,
+        ),
+        test_ip_overrides=_csv_mapping(os.environ.get("RSI_EGRESS_TEST_IP_OVERRIDES")),
     )

@@ -141,6 +141,7 @@ def test_allowed_fetch_succeeds_only_through_trusted_path_and_is_logged(compose_
     expect_failure_via_agent("https://api.openai.com/v1/models", compose_stack)
     expect_failure_via_agent("http://litellm:4000/healthz", compose_stack)
     expect_failure_via_agent("http://fetcher:8082/healthz", compose_stack)
+    expect_failure_via_agent("http://egress:8084/healthz", compose_stack)
 
     fetched = compose_http_response(
         "agent",
@@ -183,6 +184,7 @@ def test_allowed_fetch_succeeds_only_through_trusted_path_and_is_logged(compose_
         env=compose_stack,
     )["json"]
     assert status["web"]["fetcher"]["reachable"] is True
+    assert status["connections"]["egress"]["reachable"] is True
     assert status["web"]["allowlist_hosts"] == ["allowed.test"]
     assert status["web"]["counters"]["web_fetch_success"] >= 1
     assert status["surfaces"]["read_only_web"] == "trusted_fetcher_stage5_read_only_get"

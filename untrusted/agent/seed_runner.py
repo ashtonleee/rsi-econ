@@ -79,6 +79,8 @@ class RunState:
     run_id: str
     workspace_dir: Path
     runtime_code_dir: Path
+    input_url: str = ""
+    follow_target_url: str = ""
     steps: list[dict[str, Any]] = field(default_factory=list)
     last_bridge_status: dict[str, Any] | None = None
     last_bridge_chat: dict[str, Any] | None = None
@@ -99,9 +101,12 @@ class RunState:
             "run_id": self.run_id,
             "workspace_dir": str(self.workspace_dir),
             "runtime_code_dir": str(self.runtime_code_dir),
+            "input_url": self.input_url,
+            "follow_target_url": self.follow_target_url,
             "last_bridge_stage": status.get("stage", ""),
             "last_bridge_budget_remaining": status.get("budget_remaining", ""),
             "last_bridge_chat": chat.get("message", ""),
+            "last_bridge_chat_model": chat.get("model", ""),
             "last_web_fetch_url": fetch.get("url", ""),
             "last_web_fetch_request_id": fetch.get("request_id", ""),
             "last_web_fetch_trace_id": fetch.get("trace_id", ""),
@@ -112,17 +117,27 @@ class RunState:
             "last_browser_final_url": browser.get("final_url", ""),
             "last_browser_title": browser.get("page_title", ""),
             "last_browser_meta_description": browser.get("meta_description", ""),
+            "last_browser_rendered_text": browser.get("rendered_text", ""),
             "last_browser_text_preview": browser.get("text_preview", ""),
+            "last_browser_text_bytes": browser.get("text_bytes", 0),
+            "last_browser_text_truncated": browser.get("text_truncated", False),
             "last_browser_screenshot_base64": browser.get("screenshot_png_base64", ""),
             "last_browser_first_followable_target_url": first_followable.get("target_url", ""),
             "last_browser_first_followable_text": first_followable.get("text", ""),
             "last_browser_follow_request_id": browser_follow.get("request_id", ""),
             "last_browser_follow_trace_id": browser_follow.get("trace_id", ""),
             "last_browser_follow_source_url": browser_follow.get("source_url", ""),
+            "last_browser_follow_source_final_url": browser_follow.get("source_final_url", ""),
             "last_browser_follow_requested_target_url": browser_follow.get("requested_target_url", ""),
+            "last_browser_follow_matched_link_text": browser_follow.get("matched_link_text", ""),
+            "last_browser_follow_normalized_url": browser_follow.get("normalized_url", ""),
             "last_browser_follow_final_url": browser_follow.get("final_url", ""),
             "last_browser_follow_title": browser_follow.get("page_title", ""),
+            "last_browser_follow_meta_description": browser_follow.get("meta_description", ""),
+            "last_browser_follow_rendered_text": browser_follow.get("rendered_text", ""),
             "last_browser_follow_text_preview": browser_follow.get("text_preview", ""),
+            "last_browser_follow_text_bytes": browser_follow.get("text_bytes", 0),
+            "last_browser_follow_text_truncated": browser_follow.get("text_truncated", False),
             "last_browser_follow_screenshot_base64": browser_follow.get("screenshot_png_base64", ""),
         }
 
@@ -131,6 +146,8 @@ class RunState:
 class SeedRunResult:
     run_id: str
     task: str
+    input_url: str
+    follow_target_url: str
     success: bool
     finished_reason: str
     steps_executed: int
@@ -210,10 +227,14 @@ class SeedRunner:
                 "request_id": result["request_id"],
                 "trace_id": result["trace_id"],
                 "source_url": result["source_url"],
+                "source_final_url": result["source_final_url"],
                 "requested_target_url": result["requested_target_url"],
+                "matched_link_text": result["matched_link_text"],
+                "normalized_url": result["normalized_url"],
                 "final_url": result["final_url"],
                 "http_status": result["http_status"],
                 "page_title": result["page_title"],
+                "meta_description": result["meta_description"],
                 "text_bytes": result["text_bytes"],
                 "text_truncated": result["text_truncated"],
                 "screenshot_sha256": result["screenshot_sha256"],
@@ -267,7 +288,8 @@ class SeedRunner:
             }
 
         if action.kind == "bridge_browser_render":
-            response = await self.bridge_client.browser_render(url=action.params["url"])
+            url = self._resolve_text(action.params["url"], state)
+            response = await self.bridge_client.browser_render(url=url)
             state.last_browser_render = {
                 "request_id": response.request_id,
                 "trace_id": response.trace_id,
@@ -275,7 +297,10 @@ class SeedRunner:
                 "final_url": response.final_url,
                 "page_title": response.page_title,
                 "meta_description": response.meta_description,
+                "rendered_text": response.rendered_text,
                 "text_preview": response.rendered_text[:200],
+                "text_bytes": response.text_bytes,
+                "text_truncated": response.text_truncated,
                 "screenshot_png_base64": response.screenshot_png_base64,
                 "followable_links": [link.model_dump() for link in response.followable_links],
             }
@@ -306,10 +331,17 @@ class SeedRunner:
                 "request_id": response.request_id,
                 "trace_id": response.trace_id,
                 "source_url": response.source_url,
+                "source_final_url": response.source_final_url,
                 "requested_target_url": response.requested_target_url,
+                "matched_link_text": response.matched_link_text,
+                "normalized_url": response.normalized_url,
                 "final_url": response.final_url,
                 "page_title": response.page_title,
+                "meta_description": response.meta_description,
+                "rendered_text": response.rendered_text,
                 "text_preview": response.rendered_text[:200],
+                "text_bytes": response.text_bytes,
+                "text_truncated": response.text_truncated,
                 "screenshot_png_base64": response.screenshot_png_base64,
             }
             return {
@@ -382,13 +414,21 @@ class SeedRunner:
         )
         return per_run["path"]
 
-    async def run(self, task: str) -> SeedRunResult:
+    async def run(
+        self,
+        task: str,
+        *,
+        input_url: str = "",
+        follow_target_url: str = "",
+    ) -> SeedRunResult:
         run_id = uuid4().hex
         state = RunState(
             task=task,
             run_id=run_id,
             workspace_dir=self.workspace.workspace_dir,
             runtime_code_dir=self.runtime_code_dir,
+            input_url=input_url,
+            follow_target_url=follow_target_url,
         )
         await self._report(
             run_id=run_id,
@@ -399,6 +439,8 @@ class SeedRunner:
                 "task": task,
                 "workspace_dir": str(self.workspace.workspace_dir),
                 "runtime_code_dir": str(self.runtime_code_dir),
+                "input_url": input_url,
+                "follow_target_url": follow_target_url,
                 "reported_origin": "untrusted_agent",
             },
         )
@@ -457,6 +499,8 @@ class SeedRunner:
         payload = {
             "run_id": run_id,
             "task": task,
+            "input_url": state.input_url,
+            "follow_target_url": state.follow_target_url,
             "success": success,
             "finished_reason": finished_reason,
             "finish_summary": finish_summary,
@@ -483,6 +527,8 @@ class SeedRunner:
         return SeedRunResult(
             run_id=run_id,
             task=task,
+            input_url=state.input_url,
+            follow_target_url=state.follow_target_url,
             success=success,
             finished_reason=finished_reason,
             steps_executed=len(state.steps),
@@ -514,7 +560,11 @@ async def run_once(args) -> SeedRunResult:
         planner=planner,
         max_steps=args.max_steps,
     )
-    return await runner.run(args.task)
+    return await runner.run(
+        args.task,
+        input_url=args.input_url,
+        follow_target_url=args.follow_target_url,
+    )
 
 
 def main():
@@ -524,6 +574,8 @@ def main():
     parser.add_argument("--script")
     parser.add_argument("--bridge-url", default=agent_settings().bridge_url)
     parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument("--input-url", default="")
+    parser.add_argument("--follow-target-url", default="")
 
     result = asyncio.run(run_once(parser.parse_args()))
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))

@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import asyncio
 import base64
 import hashlib
+import httpx
 import os
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -15,20 +16,27 @@ from shared.schemas import (
     BrowserFollowLink,
     BrowserRenderInternalResponse,
     BrowserRenderRequest,
+    EgressFetchRequest,
+    EgressFetchResponse,
     HealthReport,
 )
 from trusted.browser.policy import (
+    browser_channel_violation,
+    classify_browser_channel,
     download_violation,
+    filechooser_violation,
     popup_violation,
     select_followable_link,
     top_level_navigation_violation,
     validate_browser_target,
 )
+from trusted.web.mediation import (
+    channel_disposition,
+    channel_record,
+)
 from trusted.web.policy import (
     WebPolicy,
     WebPolicyError,
-    resolve_target_ips,
-    validate_resolved_ips,
     web_policy_status_code,
 )
 
@@ -81,6 +89,25 @@ def _limited_text(value: str, limit_chars: int) -> str:
     return value[:limit_chars]
 
 
+def _fulfill_headers(headers: dict[str, str]) -> dict[str, str]:
+    blocked = {
+        "connection",
+        "content-length",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in blocked and not key.lower().startswith("x-rsi-")
+    }
+
+
 def _violation_detail(
     *,
     exc: WebPolicyError,
@@ -94,6 +121,7 @@ def _violation_detail(
     page_title: str,
     text_bytes: int,
     text_truncated: bool,
+    channel_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "reason": exc.reason,
@@ -111,6 +139,7 @@ def _violation_detail(
         "text_truncated": text_truncated,
         "screenshot_bytes": 0,
         "screenshot_sha256": "",
+        "channel_records": channel_records,
     }
 
 
@@ -125,6 +154,7 @@ def _error_detail(
     observed_hosts: list[str],
     resolved_ips: list[str],
     http_status: int | None,
+    channel_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "reason": reason,
@@ -142,7 +172,175 @@ def _error_detail(
         "text_truncated": False,
         "screenshot_bytes": 0,
         "screenshot_sha256": "",
+        "channel_records": channel_records,
     }
+
+
+def _browser_channel_guards_script() -> str:
+    return """
+(() => {
+  const root = window;
+  root.__RSI_BLOCKED_CHANNELS = [];
+  const record = (channel, requestedUrl, reason) => {
+    root.__RSI_BLOCKED_CHANNELS.push({
+      channel,
+      requested_url: String(requestedUrl || ""),
+      reason: String(reason || channel),
+    });
+  };
+  const reject = (channel, requestedUrl, reason) => {
+    record(channel, requestedUrl, reason);
+    throw new Error(reason || channel);
+  };
+
+  const originalFetch = root.fetch ? root.fetch.bind(root) : null;
+  if (originalFetch) {
+    root.fetch = (...args) => {
+      const target = args[0] && typeof args[0] === "object" && "url" in args[0]
+        ? args[0].url
+        : args[0];
+      record("fetch_xhr", target, "fetch_xhr_not_allowed");
+      return Promise.reject(new Error("fetch_xhr_not_allowed"));
+    };
+  }
+
+  const xhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this.__rsiUrl = url;
+    return xhrOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function() {
+    reject("fetch_xhr", this.__rsiUrl || "", "fetch_xhr_not_allowed");
+  };
+
+  const formSubmit = HTMLFormElement.prototype.submit;
+  HTMLFormElement.prototype.submit = function() {
+    reject("form_submission", this.action || "", "form_submission_not_allowed");
+  };
+  if (HTMLFormElement.prototype.requestSubmit) {
+    HTMLFormElement.prototype.requestSubmit = function() {
+      reject("form_submission", this.action || "", "form_submission_not_allowed");
+    };
+  }
+
+  if (root.WebSocket) {
+    const OriginalWebSocket = root.WebSocket;
+    root.WebSocket = function(url) {
+      reject("websocket", url, "websocket_not_allowed");
+    };
+    root.WebSocket.prototype = OriginalWebSocket.prototype;
+  }
+
+  if (root.EventSource) {
+    const OriginalEventSource = root.EventSource;
+    root.EventSource = function(url) {
+      reject("eventsource", url, "eventsource_not_allowed");
+    };
+    root.EventSource.prototype = OriginalEventSource.prototype;
+  }
+
+  if (navigator.sendBeacon) {
+    const originalSendBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function(url) {
+      record("send_beacon", url, "send_beacon_not_allowed");
+      return false;
+    };
+  }
+
+  const originalWindowOpen = root.open ? root.open.bind(root) : null;
+  if (originalWindowOpen) {
+    root.open = function(url) {
+      record("popup", url, "popup_not_allowed");
+      return null;
+    };
+  }
+
+  if (root.location && root.location.assign) {
+    const originalAssign = root.location.assign.bind(root.location);
+    root.location.assign = function(url) {
+      reject("external_protocol", url, "external_protocol_not_allowed");
+    };
+  }
+  if (root.location && root.location.replace) {
+    const originalReplace = root.location.replace.bind(root.location);
+    root.location.replace = function(url) {
+      reject("external_protocol", url, "external_protocol_not_allowed");
+    };
+  }
+
+  const appendChild = Element.prototype.appendChild;
+  Element.prototype.appendChild = function(node) {
+    if (node && node.tagName === "LINK") {
+      const rel = String(node.rel || "").toLowerCase();
+      if (rel === "prefetch" || rel === "preconnect") {
+        record("prefetch_preconnect", node.href || "", "prefetch_preconnect_not_allowed");
+        return node;
+      }
+    }
+    return appendChild.call(this, node);
+  };
+
+  const click = HTMLElement.prototype.click;
+  HTMLElement.prototype.click = function() {
+    if (this && this.tagName === "A") {
+      const href = this.href || this.getAttribute("href") || "";
+      if (href && !href.startsWith("http://") && !href.startsWith("https://")) {
+        reject("external_protocol", href, "external_protocol_not_allowed");
+      }
+    }
+    if (this && this.tagName === "INPUT" && String(this.type || "").toLowerCase() === "file") {
+      reject("upload", "", "upload_not_allowed");
+    }
+    return click.call(this);
+  };
+  if (root.HTMLInputElement && HTMLInputElement.prototype.showPicker) {
+    const showPicker = HTMLInputElement.prototype.showPicker;
+    HTMLInputElement.prototype.showPicker = function() {
+      if (this && String(this.type || "").toLowerCase() === "file") {
+        reject("upload", "", "upload_not_allowed");
+      }
+      return showPicker.call(this);
+    };
+  }
+
+  if (root.Worker) {
+    const OriginalWorker = root.Worker;
+    root.Worker = function(url) {
+      reject("worker", url, "worker_not_allowed");
+    };
+    root.Worker.prototype = OriginalWorker.prototype;
+  }
+  if (root.SharedWorker) {
+    const OriginalSharedWorker = root.SharedWorker;
+    root.SharedWorker = function(url) {
+      reject("worker", url, "worker_not_allowed");
+    };
+    root.SharedWorker.prototype = OriginalSharedWorker.prototype;
+  }
+  if (navigator.serviceWorker && navigator.serviceWorker.register) {
+    const originalRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+    navigator.serviceWorker.register = function(url) {
+      reject("worker", url, "worker_not_allowed");
+    };
+  }
+})();
+""".strip()
+
+
+async def _extract_js_channel_events(page) -> list[dict[str, Any]]:
+    return await page.evaluate(
+        "() => Array.isArray(window.__RSI_BLOCKED_CHANNELS) ? window.__RSI_BLOCKED_CHANNELS : []"
+    )
+
+
+def _plain_channel_records(records: list[Any]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for record in records:
+        if hasattr(record, "model_dump"):
+            payload.append(record.model_dump())
+        else:
+            payload.append(dict(record))
+    return payload
 
 
 async def _extract_meta_description(page) -> str:
@@ -207,6 +405,175 @@ async def _extract_followable_links(
     return followable_links
 
 
+async def _preflight_navigation(
+    url: str,
+    *,
+    policy: WebPolicy,
+) -> tuple[Any, list[str], set[str], set[str], list[dict[str, Any]]]:
+    current_target = validate_browser_target(url, policy)
+    current_channel = "top_level_navigation"
+    redirect_chain: list[str] = []
+    observed_hosts = {current_target.host}
+    resolved_ips: set[str] = set()
+    channel_records: list[dict[str, Any]] = []
+
+    for _ in range(policy.max_redirects + 1):
+        try:
+            response = await app.state.egress_client.post(
+                "/internal/fetch",
+                json=EgressFetchRequest(
+                    url=current_target.normalized_url,
+                    channel=current_channel,
+                    headers={},
+                    max_body_bytes=1,
+                ).model_dump(),
+            )
+            response.raise_for_status()
+            egress = EgressFetchResponse.model_validate(response.json())
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.json()["detail"]
+            observed_hosts.add(detail.get("host", current_target.host))
+            resolved_ips.update(detail.get("approved_ips", []))
+            denied = channel_record(
+                channel=current_channel,
+                requested_url=current_target.normalized_url,
+                disposition="denied",
+                reason=detail.get("reason", "egress_denied"),
+                top_level=current_channel in {"top_level_navigation", "redirect"},
+                navigation=True,
+            )
+            denied.update(
+                {
+                    "normalized_url": detail.get("normalized_url", current_target.normalized_url),
+                    "host": detail.get("host", current_target.host),
+                    "approved_ips": list(detail.get("approved_ips", [])),
+                    "actual_peer_ip": detail.get("actual_peer_ip"),
+                    "dialed_ip": detail.get("dialed_ip"),
+                    "enforcement_stage": detail.get("enforcement_stage", "unknown"),
+                    "request_forwarded": bool(detail.get("request_forwarded", False)),
+                }
+            )
+            channel_records.append(denied)
+            status_code = (
+                403
+                if detail.get("reason") in {"connect_failed", "peer_binding_mismatch", "peer_binding_missing"}
+                else exc.response.status_code
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail=_error_detail(
+                    reason=detail.get("reason", "egress_denied"),
+                    detail=detail.get("detail", detail.get("reason", "egress_denied")),
+                    normalized_url=current_target.normalized_url,
+                    final_url=current_target.normalized_url,
+                    host=current_target.host,
+                    redirect_chain=list(redirect_chain),
+                    observed_hosts=sorted(observed_hosts),
+                    resolved_ips=sorted(resolved_ips),
+                    http_status=detail.get("http_status"),
+                    channel_records=list(channel_records),
+                ),
+            ) from exc
+
+        allowed = channel_record(
+            channel=current_channel,
+            requested_url=current_target.normalized_url,
+            disposition="allowed",
+            reason="pre_connect_pinned",
+            top_level=current_channel in {"top_level_navigation", "redirect"},
+            navigation=True,
+        )
+        allowed.update(
+            {
+                "normalized_url": egress.normalized_url,
+                "host": egress.host,
+                "approved_ips": list(egress.approved_ips),
+                "actual_peer_ip": egress.actual_peer_ip,
+                "dialed_ip": egress.dialed_ip,
+                "enforcement_stage": egress.enforcement_stage,
+                "request_forwarded": egress.request_forwarded,
+                "reason": "redirect_hop_allowed"
+                if egress.http_status in {301, 302, 303, 307, 308}
+                else "pre_connect_pinned",
+            }
+        )
+        channel_records.append(allowed)
+        observed_hosts.add(egress.host)
+        resolved_ips.update(egress.approved_ips)
+
+        if egress.http_status not in {301, 302, 303, 307, 308}:
+            return current_target, redirect_chain, observed_hosts, resolved_ips, channel_records
+
+        location = egress.headers.get("location", "").strip()
+        if not location:
+            raise HTTPException(
+                status_code=400,
+                detail=_error_detail(
+                    reason="redirect_missing_location",
+                    detail=current_target.normalized_url,
+                    normalized_url=current_target.normalized_url,
+                    final_url=current_target.normalized_url,
+                    host=current_target.host,
+                    redirect_chain=list(redirect_chain),
+                    observed_hosts=sorted(observed_hosts),
+                    resolved_ips=sorted(resolved_ips),
+                    http_status=egress.http_status,
+                    channel_records=list(channel_records),
+                ),
+            )
+
+        try:
+            next_target = validate_browser_target(urljoin(current_target.normalized_url, location), policy)
+        except WebPolicyError as exc:
+            denied = channel_record(
+                channel="redirect",
+                requested_url=urljoin(current_target.normalized_url, location),
+                disposition="denied",
+                reason=exc.reason,
+                top_level=True,
+                navigation=True,
+            )
+            channel_records.append(denied)
+            raise HTTPException(
+                status_code=_browser_status_code(exc.reason),
+                detail=_violation_detail(
+                    exc=exc,
+                    normalized_url=current_target.normalized_url,
+                    final_url=current_target.normalized_url,
+                    host=current_target.host,
+                    redirect_chain=list(redirect_chain),
+                    observed_hosts=sorted(observed_hosts),
+                    resolved_ips=sorted(resolved_ips),
+                    http_status=egress.http_status,
+                    page_title="",
+                    text_bytes=0,
+                    text_truncated=False,
+                    channel_records=list(channel_records),
+                ),
+            ) from exc
+
+        redirect_chain.append(next_target.normalized_url)
+        observed_hosts.add(next_target.host)
+        current_target = next_target
+        current_channel = "redirect"
+
+    raise HTTPException(
+        status_code=403,
+        detail=_error_detail(
+            reason="too_many_redirects",
+            detail=url.strip(),
+            normalized_url=url.strip(),
+            final_url=url.strip(),
+            host=urlsplit(url).hostname or "",
+            redirect_chain=list(redirect_chain),
+            observed_hosts=sorted(observed_hosts),
+            resolved_ips=sorted(resolved_ips),
+            http_status=None,
+            channel_records=list(channel_records),
+        ),
+    )
+
+
 async def _render_page(
     url: str,
     *,
@@ -215,12 +582,37 @@ async def _render_page(
 ) -> BrowserRenderInternalResponse:
     settings = app.state.settings
     policy = app.state.policy
-    target = validate_browser_target(url, policy)
-    initial_ips = validate_resolved_ips(target, resolve_target_ips(target), policy)
+    try:
+        target = validate_browser_target(url, policy)
+    except WebPolicyError as exc:
+        raise HTTPException(
+            status_code=_browser_status_code(exc.reason),
+            detail={
+                "reason": exc.reason,
+                "detail": exc.detail,
+                "normalized_url": url.strip(),
+                "final_url": url.strip(),
+                "host": "",
+                "allowlist_decision": "denied",
+                "redirect_chain": [],
+                "observed_hosts": [],
+                "resolved_ips": [],
+                "http_status": None,
+                "page_title": "",
+                "meta_description": "",
+                "rendered_text_sha256": "",
+                "text_bytes": 0,
+                "text_truncated": False,
+                "screenshot_sha256": "",
+                "screenshot_bytes": 0,
+                "channel_records": [],
+            },
+        ) from exc
 
-    redirect_chain: list[str] = []
-    observed_hosts = {target.host}
-    resolved_ips = set(initial_ips)
+    target, redirect_chain, observed_hosts, resolved_ips, channel_records = await _preflight_navigation(
+        target.normalized_url,
+        policy=policy,
+    )
     violation: WebPolicyError | None = None
     http_status: int | None = None
     page_title = ""
@@ -228,6 +620,7 @@ async def _render_page(
     text_truncated = False
     event_tasks: list[asyncio.Task] = []
     locked_main_url: str | None = None
+    top_level_started = False
 
     browser = app.state.browser
     context = await browser.new_context(
@@ -239,6 +632,7 @@ async def _render_page(
         service_workers="block",
     )
     page = await context.new_page()
+    await page.add_init_script(_browser_channel_guards_script())
 
     async def record_violation(exc: WebPolicyError):
         nonlocal violation
@@ -246,59 +640,227 @@ async def _render_page(
             violation = exc
 
     async def handle_route(route):
+        nonlocal locked_main_url, top_level_started
         request = route.request
         request_url = request.url
-        try:
-            request_target = validate_browser_target(request_url, policy)
-            request_ips = validate_resolved_ips(
-                request_target,
-                resolve_target_ips(request_target),
-                policy,
+        channel = classify_browser_channel(
+            resource_type=request.resource_type,
+            is_navigation_request=request.is_navigation_request(),
+            is_main_frame=request.frame == page.main_frame,
+            headers=dict(request.headers),
+            top_level_started=top_level_started,
+        )
+        is_top_level = request.is_navigation_request() and request.frame == page.main_frame
+        is_navigation = request.is_navigation_request()
+
+        if is_top_level and locked_main_url is not None:
+            exc = top_level_navigation_violation(request_url)
+            channel_records.append(
+                channel_record(
+                    channel="top_level_navigation",
+                    requested_url=request_url,
+                    disposition="denied",
+                    reason=exc.reason,
+                    top_level=True,
+                    navigation=True,
+                )
             )
-        except WebPolicyError as exc:
             await record_violation(exc)
             await route.abort("blockedbyclient")
             return
 
-        observed_hosts.add(request_target.host)
-        resolved_ips.update(request_ips)
-        if request.is_navigation_request() and request.frame == page.main_frame:
-            if locked_main_url is not None and request_target.normalized_url != locked_main_url:
-                await record_violation(top_level_navigation_violation(request_target.normalized_url))
-                await route.abort("blockedbyclient")
-                return
-        if request.is_navigation_request() and request_target.normalized_url != target.normalized_url:
+        try:
+            normalized = validate_browser_target(request_url, policy)
+        except WebPolicyError as exc:
+            channel_records.append(
+                channel_record(
+                    channel=channel,
+                    requested_url=request_url,
+                    disposition="denied",
+                    reason=exc.reason,
+                    top_level=is_top_level,
+                    navigation=is_navigation,
+                )
+            )
+            await record_violation(exc)
+            await route.abort("blockedbyclient")
+            return
+
+        if channel not in {"top_level_navigation", "redirect"} and channel_disposition(channel):
+            exc = browser_channel_violation(channel, request_url)
+            channel_records.append(
+                channel_record(
+                    channel=channel,
+                    requested_url=request_url,
+                    disposition="denied",
+                    reason=exc.reason,
+                    top_level=is_top_level,
+                    navigation=is_navigation,
+                )
+            )
+            await record_violation(exc)
+            await route.abort("blockedbyclient")
+            return
+
+        observed_hosts.add(normalized.host)
+        if channel == "redirect":
             if len(redirect_chain) >= policy.max_redirects:
-                await record_violation(
-                    WebPolicyError(
-                        "too_many_redirects",
-                        request_target.normalized_url,
+                exc = WebPolicyError("too_many_redirects", normalized.normalized_url)
+                channel_records.append(
+                    channel_record(
+                        channel=channel,
+                        requested_url=request_url,
+                        disposition="denied",
+                        reason=exc.reason,
+                        top_level=is_top_level,
+                        navigation=is_navigation,
                     )
                 )
+                await record_violation(exc)
                 await route.abort("blockedbyclient")
                 return
-            if request_target.normalized_url not in redirect_chain:
-                redirect_chain.append(request_target.normalized_url)
-        await route.continue_()
+            if normalized.normalized_url not in redirect_chain:
+                redirect_chain.append(normalized.normalized_url)
+        if is_top_level:
+            top_level_started = True
+
+        record = channel_record(
+            channel=channel,
+            requested_url=request_url,
+            disposition="allowed",
+            reason="pre_connect_pending",
+            top_level=is_top_level,
+            navigation=is_navigation,
+        )
+        try:
+            response = await app.state.egress_client.post(
+                "/internal/fetch",
+                json=EgressFetchRequest(
+                    url=normalized.normalized_url,
+                    channel=channel,
+                    headers=dict(request.headers),
+                    max_body_bytes=2 * 1024 * 1024,
+                ).model_dump(),
+            )
+            response.raise_for_status()
+            egress = EgressFetchResponse.model_validate(response.json())
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.json()["detail"]
+            record.update(
+                {
+                    "normalized_url": detail.get("normalized_url", normalized.normalized_url),
+                    "host": detail.get("host", normalized.host),
+                    "approved_ips": list(detail.get("approved_ips", [])),
+                    "actual_peer_ip": detail.get("actual_peer_ip"),
+                    "dialed_ip": detail.get("dialed_ip"),
+                    "disposition": "denied",
+                    "reason": detail.get("reason", "egress_denied"),
+                    "enforcement_stage": detail.get("enforcement_stage", "unknown"),
+                    "request_forwarded": bool(detail.get("request_forwarded", False)),
+                }
+            )
+            observed_hosts.add(detail.get("host", normalized.host))
+            resolved_ips.update(detail.get("approved_ips", []))
+            channel_records.append(record)
+            await record_violation(
+                WebPolicyError(
+                    detail.get("reason", "egress_denied"),
+                    detail.get("detail", detail.get("reason", "egress_denied")),
+                )
+            )
+            await route.fulfill(
+                status=exc.response.status_code,
+                headers={"content-type": "text/plain; charset=utf-8"},
+                body=detail.get("reason", "egress_denied"),
+            )
+            return
+
+        record.update(
+            {
+                "normalized_url": egress.normalized_url,
+                "host": egress.host,
+                "approved_ips": list(egress.approved_ips),
+                "actual_peer_ip": egress.actual_peer_ip,
+                "dialed_ip": egress.dialed_ip,
+                "reason": "pre_connect_pinned",
+                "enforcement_stage": egress.enforcement_stage,
+                "request_forwarded": egress.request_forwarded,
+            }
+        )
+        if egress.http_status in {301, 302, 303, 307, 308}:
+            location = egress.headers.get("location", "").strip()
+            if location:
+                redirect_chain.append(urljoin(normalized.normalized_url, location))
+            exc = top_level_navigation_violation(location or normalized.normalized_url)
+            record.update(
+                {
+                    "disposition": "denied",
+                    "reason": exc.reason,
+                }
+            )
+            channel_records.append(record)
+            await record_violation(exc)
+            await route.fulfill(
+                status=403,
+                headers={"content-type": "text/plain; charset=utf-8"},
+                body=exc.reason,
+            )
+            return
+        observed_hosts.add(egress.host)
+        resolved_ips.update(egress.approved_ips)
+        channel_records.append(record)
+        await route.fulfill(
+            status=egress.http_status,
+            headers=_fulfill_headers(egress.headers),
+            body=base64.b64decode(egress.body_base64),
+        )
 
     async def handle_popup(popup):
-        await record_violation(popup_violation(popup.url or page.url))
+        exc = popup_violation(popup.url or page.url)
+        channel_records.append(
+            channel_record(
+                channel="popup",
+                requested_url=popup.url or page.url,
+                disposition="denied",
+                reason=exc.reason,
+            )
+        )
+        await record_violation(exc)
         try:
             await popup.close()
         except Exception:
             pass
 
     async def handle_download(download):
-        await record_violation(
-            download_violation(
-                page.url or target.normalized_url,
-                suggested_filename=getattr(download, "suggested_filename", None),
+        exc = download_violation(
+            page.url or target.normalized_url,
+            suggested_filename=getattr(download, "suggested_filename", None),
+        )
+        channel_records.append(
+            channel_record(
+                channel="download",
+                requested_url=page.url or target.normalized_url,
+                disposition="denied",
+                reason=exc.reason,
             )
         )
+        await record_violation(exc)
         try:
             await download.cancel()
         except Exception:
             pass
+
+    async def handle_filechooser(file_chooser):
+        exc = filechooser_violation(file_chooser.page.url or page.url)
+        channel_records.append(
+            channel_record(
+                channel="upload",
+                requested_url=file_chooser.page.url or page.url,
+                disposition="denied",
+                reason=exc.reason,
+            )
+        )
+        await record_violation(exc)
 
     page.on(
         "popup",
@@ -307,6 +869,10 @@ async def _render_page(
     page.on(
         "download",
         lambda download: event_tasks.append(asyncio.create_task(handle_download(download))),
+    )
+    page.on(
+        "filechooser",
+        lambda chooser: event_tasks.append(asyncio.create_task(handle_filechooser(chooser))),
     )
     await page.route("**/*", handle_route)
 
@@ -319,27 +885,40 @@ async def _render_page(
         if response is not None:
             http_status = response.status
         if strict_top_level_after_load:
-            locked_target = validate_browser_target(page.url or target.normalized_url, policy)
-            locked_ips = validate_resolved_ips(
-                locked_target,
-                resolve_target_ips(locked_target),
-                policy,
+            locked_target = validate_browser_target(
+                page.url or target.normalized_url,
+                policy=policy,
             )
             locked_main_url = locked_target.normalized_url
             observed_hosts.add(locked_target.host)
-            resolved_ips.update(locked_ips)
         await page.wait_for_timeout(settings.settle_time_ms)
         if event_tasks:
             await asyncio.gather(*event_tasks, return_exceptions=True)
+
+        for js_event in await _extract_js_channel_events(page):
+            requested_url = str(js_event.get("requested_url", "")).strip()
+            reason = str(js_event.get("reason", "browser_channel_not_allowed"))
+            channel = str(js_event.get("channel", "subresource"))
+            channel_records.append(
+                channel_record(
+                    channel=channel,
+                    requested_url=requested_url,
+                    disposition="denied",
+                    reason=reason,
+                )
+            )
+            if violation is None:
+                await record_violation(browser_channel_violation(channel, requested_url or reason))
 
         if violation is not None:
             raise violation
 
         final_url = page.url or target.normalized_url
-        final_target = validate_browser_target(final_url, policy)
-        final_ips = validate_resolved_ips(final_target, resolve_target_ips(final_target), policy)
+        final_target = validate_browser_target(
+            final_url,
+            policy=policy,
+        )
         observed_hosts.add(final_target.host)
-        resolved_ips.update(final_ips)
 
         page_title = _limited_text(await page.title(), 256)
         meta_description = await _extract_meta_description(page)
@@ -378,6 +957,7 @@ async def _render_page(
             redirect_chain=list(redirect_chain),
             observed_hosts=sorted(observed_hosts),
             resolved_ips=sorted(resolved_ips),
+            channel_records=list(channel_records),
             followable_links=followable_links,
         )
     except WebPolicyError as exc:
@@ -395,6 +975,7 @@ async def _render_page(
                 page_title=page_title,
                 text_bytes=text_bytes,
                 text_truncated=text_truncated,
+                channel_records=list(channel_records),
             ),
         ) from exc
     except HTTPException:
@@ -415,6 +996,7 @@ async def _render_page(
                     page_title=page_title,
                     text_bytes=text_bytes,
                     text_truncated=text_truncated,
+                    channel_records=list(channel_records),
                 ),
             ) from exc
         raise HTTPException(
@@ -429,6 +1011,7 @@ async def _render_page(
                 observed_hosts=sorted(observed_hosts),
                 resolved_ips=sorted(resolved_ips),
                 http_status=http_status,
+                channel_records=list(channel_records),
             ),
         ) from exc
     finally:
@@ -447,6 +1030,8 @@ def _follow_detail(
     navigation_history = [source_render.final_url, requested_target_url]
     if final_url and final_url not in navigation_history:
         navigation_history.append(final_url)
+    source_channel_records = _plain_channel_records(list(source_render.channel_records))
+    target_channel_records = _plain_channel_records(list(detail.get("channel_records", [])))
     return {
         "source_url": source_render.normalized_url,
         "source_final_url": source_render.final_url,
@@ -469,12 +1054,13 @@ def _follow_detail(
         "text_truncated": bool(detail.get("text_truncated", False)),
         "screenshot_sha256": detail.get("screenshot_sha256", ""),
         "screenshot_bytes": int(detail.get("screenshot_bytes", 0)),
+        "channel_records": source_channel_records + target_channel_records,
         "reason": detail.get("reason", detail.get("detail", "browser_follow_href_failed")),
     }
 
 
 async def execute_render(url: str) -> BrowserRenderInternalResponse:
-    return await _render_page(url, strict_top_level_after_load=False, include_followable_links=True)
+    return await _render_page(url, strict_top_level_after_load=True, include_followable_links=True)
 
 
 async def execute_follow_href(
@@ -509,6 +1095,7 @@ async def execute_follow_href(
                 "text_truncated": False,
                 "screenshot_sha256": "",
                 "screenshot_bytes": 0,
+                "channel_records": [],
                 "reason": exc.reason,
                 "detail": exc.detail,
             },
@@ -542,6 +1129,7 @@ async def execute_follow_href(
                     "text_truncated": False,
                     "screenshot_sha256": "",
                     "screenshot_bytes": 0,
+                    "channel_records": _plain_channel_records(list(source_render.channel_records)),
                     "reason": exc.reason,
                     "detail": exc.detail,
                 },
@@ -594,6 +1182,8 @@ async def execute_follow_href(
             set(source_render.observed_hosts) | set(target_render.observed_hosts)
         ),
         resolved_ips=sorted(set(source_render.resolved_ips) | set(target_render.resolved_ips)),
+        channel_records=_plain_channel_records(list(source_render.channel_records))
+        + _plain_channel_records(list(target_render.channel_records)),
     )
 
 
@@ -615,11 +1205,18 @@ async def _launch_browser_runtime():
 async def lifespan(app: FastAPI):
     startup_checks(app)
     playwright, browser = await _launch_browser_runtime()
+    egress_client = httpx.AsyncClient(
+        base_url=app.state.settings.egress_url,
+        timeout=app.state.settings.timeout_seconds + 1.0,
+        trust_env=False,
+    )
     app.state.playwright = playwright
     app.state.browser = browser
+    app.state.egress_client = egress_client
     try:
         yield
     finally:
+        await egress_client.aclose()
         await browser.close()
         await playwright.stop()
 
@@ -647,6 +1244,7 @@ async def healthz() -> HealthReport:
             "max_screenshot_bytes": settings.max_screenshot_bytes,
             "max_followable_links": settings.max_followable_links,
             "max_follow_hops": settings.max_follow_hops,
+            "egress_url": settings.egress_url,
             "running_as_root": os.geteuid() == 0,
             "chromium_sandbox": bool(launch_kwargs["chromium_sandbox"]),
             "launch_args": list(launch_kwargs["args"]),

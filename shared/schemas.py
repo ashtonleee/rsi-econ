@@ -219,6 +219,21 @@ class WebFetchRequest(BaseModel):
     url: str
 
 
+class MediationHopRecord(BaseModel):
+    channel: str
+    requested_url: str
+    normalized_url: str
+    host: str
+    approved_ips: list[str] = Field(default_factory=list)
+    actual_peer_ip: str | None = None
+    dialed_ip: str | None = None
+    disposition: Literal["allowed", "denied", "classified"]
+    reason: str
+    http_status: int | None = None
+    enforcement_stage: Literal["unknown", "pre_connect", "post_connect"] = "unknown"
+    request_forwarded: bool = False
+
+
 class FetcherFetchResponse(BaseModel):
     normalized_url: str
     final_url: str
@@ -231,9 +246,12 @@ class FetcherFetchResponse(BaseModel):
     truncated: bool
     redirect_chain: list[str]
     resolved_ips: list[str]
+    approved_ips: list[str] = Field(default_factory=list)
+    actual_peer_ip: str | None = None
     used_ip: str | None = None
     content_sha256: str
     text: str
+    mediation_hops: list[MediationHopRecord] = Field(default_factory=list)
 
 
 class WebFetchResponse(FetcherFetchResponse):
@@ -249,6 +267,22 @@ class BrowserFollowLink(BaseModel):
     text: str
     target_url: str
     same_origin: bool
+
+
+class BrowserChannelRecord(BaseModel):
+    channel: str
+    requested_url: str
+    normalized_url: str
+    host: str
+    approved_ips: list[str] = Field(default_factory=list)
+    actual_peer_ip: str | None = None
+    dialed_ip: str | None = None
+    disposition: Literal["allowed", "denied", "classified"]
+    reason: str
+    top_level: bool = False
+    navigation: bool = False
+    enforcement_stage: Literal["unknown", "pre_connect", "post_connect"] = "unknown"
+    request_forwarded: bool = False
 
 
 class BrowserRenderInternalResponse(BaseModel):
@@ -267,6 +301,7 @@ class BrowserRenderInternalResponse(BaseModel):
     redirect_chain: list[str]
     observed_hosts: list[str]
     resolved_ips: list[str]
+    channel_records: list[BrowserChannelRecord] = Field(default_factory=list)
     followable_links: list[BrowserFollowLink] = Field(default_factory=list)
 
 
@@ -302,8 +337,56 @@ class BrowserFollowHrefInternalResponse(BaseModel):
     redirect_chain: list[str]
     observed_hosts: list[str]
     resolved_ips: list[str]
+    channel_records: list[BrowserChannelRecord] = Field(default_factory=list)
 
 
 class BrowserFollowHrefResponse(BrowserFollowHrefInternalResponse):
     request_id: str
     trace_id: str
+
+
+class EgressFetchRequest(BaseModel):
+    url: str
+    channel: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    max_body_bytes: int = 0
+
+
+class EgressFetchResponse(BaseModel):
+    normalized_url: str
+    scheme: Literal["http", "https"]
+    host: str
+    port: int
+    channel: str
+    approved_ips: list[str] = Field(default_factory=list)
+    actual_peer_ip: str | None = None
+    dialed_ip: str | None = None
+    request_forwarded: bool = False
+    enforcement_stage: Literal["pre_connect"]
+    http_status: int
+    headers: dict[str, str] = Field(default_factory=dict)
+    body_base64: str
+
+
+class EgressDecisionRecord(BaseModel):
+    token: str
+    channel: str
+    requested_url: str
+    normalized_url: str
+    host: str
+    approved_ips: list[str] = Field(default_factory=list)
+    actual_peer_ip: str | None = None
+    dialed_ip: str | None = None
+    disposition: Literal["allowed", "denied", "classified"]
+    reason: str
+    http_status: int | None = None
+    enforcement_stage: Literal["pre_connect"]
+    request_forwarded: bool = False
+
+
+class EgressDecisionDrainRequest(BaseModel):
+    tokens: list[str] = Field(default_factory=list)
+
+
+class EgressDecisionDrainResponse(BaseModel):
+    records: list[EgressDecisionRecord] = Field(default_factory=list)

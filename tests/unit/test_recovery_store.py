@@ -1,5 +1,7 @@
+import io
 import json
 from pathlib import Path
+import tarfile
 
 import pytest
 
@@ -12,6 +14,15 @@ def write_tree(root: Path, files: dict[str, str]):
         path = root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="ascii")
+
+
+def write_malicious_archive(archive_path: Path, *, member_name: str = "../escape.txt"):
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"escape\n"
+    info = tarfile.TarInfo(name=member_name)
+    info.size = len(payload)
+    with tarfile.open(archive_path, "w:gz") as archive:
+        archive.addfile(info, io.BytesIO(payload))
 
 
 def test_workspace_recovery_store_creates_restores_and_resets(tmp_path):
@@ -103,6 +114,30 @@ def test_workspace_recovery_store_rejects_invalid_checkpoint_id(tmp_path):
         store.restore_checkpoint("missing-checkpoint")
 
 
+@pytest.mark.fast
+def test_workspace_recovery_store_rejects_hostile_checkpoint_archive(tmp_path):
+    baseline_dir = tmp_path / "baseline"
+    workspace_dir = tmp_path / "workspace"
+    recovery_dir = tmp_path / "trusted_state" / "checkpoints"
+    write_tree(baseline_dir, {"seedlib.py": "x = 1\n"})
+    write_tree(workspace_dir, {"seedlib.py": "x = 1\n"})
+
+    store = WorkspaceRecoveryStore(
+        workspace_dir=workspace_dir,
+        recovery_dir=recovery_dir,
+        baseline_source_dir=baseline_dir,
+    )
+    checkpoint = store.create_checkpoint(label="hostile-archive")
+    archive_path = Path(checkpoint["archive_path"])
+    outside_path = workspace_dir.parent / "escape.txt"
+    write_malicious_archive(archive_path)
+
+    with pytest.raises(ValueError, match="archive path escapes workspace"):
+        store.restore_checkpoint(checkpoint["checkpoint_id"])
+
+    assert not outside_path.exists()
+
+
 def test_workspace_recovery_store_rewrites_baseline_manifest_when_paths_drift(tmp_path):
     baseline_dir = tmp_path / "baseline"
     workspace_dir = tmp_path / "workspace"
@@ -128,6 +163,29 @@ def test_workspace_recovery_store_rewrites_baseline_manifest_when_paths_drift(tm
         recovery_dir / "baselines" / "seed_workspace_baseline.tar.gz"
     )
     assert refreshed["baseline"]["baseline_source_dir"] == str(baseline_dir)
+
+
+@pytest.mark.fast
+def test_workspace_recovery_store_rejects_hostile_baseline_archive(tmp_path):
+    baseline_dir = tmp_path / "baseline"
+    workspace_dir = tmp_path / "workspace"
+    recovery_dir = tmp_path / "trusted_state" / "checkpoints"
+    write_tree(baseline_dir, {"seedlib.py": "x = 1\n"})
+    write_tree(workspace_dir, {"seedlib.py": "x = 1\n"})
+
+    store = WorkspaceRecoveryStore(
+        workspace_dir=workspace_dir,
+        recovery_dir=recovery_dir,
+        baseline_source_dir=baseline_dir,
+    )
+    layout = store.ensure_layout()
+    outside_path = workspace_dir.parent / "escape.txt"
+    write_malicious_archive(Path(layout["baseline"]["archive_path"]))
+
+    with pytest.raises(ValueError, match="archive path escapes workspace"):
+        store.reset_to_seed_baseline()
+
+    assert not outside_path.exists()
 
 
 def test_trusted_state_manager_materializes_recovery_events(tmp_path):

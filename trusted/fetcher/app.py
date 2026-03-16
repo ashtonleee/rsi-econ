@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import base64
 import hashlib
 from typing import Any
 
@@ -6,14 +7,19 @@ import httpx
 from fastapi import FastAPI, HTTPException
 
 from shared.config import fetcher_settings
-from shared.schemas import FetcherFetchResponse, HealthReport, WebFetchRequest
+from shared.schemas import (
+    EgressFetchRequest,
+    EgressFetchResponse,
+    FetcherFetchResponse,
+    HealthReport,
+    WebFetchRequest,
+)
 from trusted.web.policy import (
-    WebPolicy,
+    NormalizedWebTarget,
     WebPolicyError,
+    WebPolicy,
     normalize_web_redirect_target,
     normalize_web_target,
-    resolve_target_ips,
-    validate_resolved_ips,
     web_policy_status_code,
 )
 
@@ -45,18 +51,6 @@ def _decode_text(raw: bytes, *, content_type: str, max_preview_chars: int) -> st
     return text[:max_preview_chars]
 
 
-def _used_ip(response: httpx.Response) -> str | None:
-    stream = response.extensions.get("network_stream")
-    if stream is None:
-        return None
-    server_addr = stream.get_extra_info("server_addr")
-    if server_addr is None:
-        return None
-    if isinstance(server_addr, tuple):
-        return str(server_addr[0])
-    return str(server_addr)
-
-
 def _content_type_allowed(content_type: str, *, allowed_content_types: tuple[str, ...]) -> bool:
     value = content_type.split(";", 1)[0].strip().lower()
     return value in allowed_content_types
@@ -77,11 +71,40 @@ async def _read_limited_body(response: httpx.Response, limit: int) -> tuple[byte
     return bytes(data[:limit]), truncated or len(data) > limit
 
 
+def _mediation_hop(
+    target: NormalizedWebTarget,
+    *,
+    channel: str,
+    approved_ips: list[str] | tuple[str, ...],
+    disposition: str,
+    reason: str,
+    actual_peer_ip: str | None,
+    dialed_ip: str | None,
+    http_status: int | None,
+    enforcement_stage: str = "unknown",
+    request_forwarded: bool = False,
+) -> dict[str, Any]:
+    return {
+        "channel": channel,
+        "requested_url": target.original_url,
+        "normalized_url": target.normalized_url,
+        "host": target.host,
+        "approved_ips": list(approved_ips),
+        "actual_peer_ip": actual_peer_ip,
+        "dialed_ip": dialed_ip,
+        "disposition": disposition,
+        "reason": reason,
+        "http_status": http_status,
+        "enforcement_stage": enforcement_stage,
+        "request_forwarded": request_forwarded,
+    }
+
+
 async def execute_fetch(url: str) -> FetcherFetchResponse:
     policy = app.state.policy
     settings = app.state.settings
     try:
-        current = normalize_web_target(url, policy)
+        current_target = normalize_web_target(url, policy)
     except WebPolicyError as exc:
         raise HTTPException(
             status_code=web_policy_status_code(exc.reason),
@@ -92,100 +115,220 @@ async def execute_fetch(url: str) -> FetcherFetchResponse:
                 "scheme": "",
                 "host": "",
                 "port": 0,
+                "approved_ips": [],
+                "actual_peer_ip": None,
+                "used_ip": None,
+                "mediation_hops": [],
                 "redirect_chain": [],
             },
         ) from exc
     redirect_chain: list[str] = []
+    mediation_hops: list[dict[str, Any]] = []
+    current_channel = "top_level_navigation"
 
     async with httpx.AsyncClient(
-        timeout=policy.timeout_seconds,
-        follow_redirects=False,
+        base_url=settings.egress_url,
+        timeout=policy.timeout_seconds + 1.0,
         trust_env=False,
     ) as client:
         for _ in range(policy.max_redirects + 1):
-            resolved_ips = validate_resolved_ips(current, resolve_target_ips(current), policy)
             headers = {
                 "User-Agent": settings.user_agent,
                 "Accept": ", ".join(settings.allowed_content_types),
             }
             try:
-                async with client.stream("GET", current.normalized_url, headers=headers) as response:
-                    used_ip = _used_ip(response)
-                    status = response.status_code
-                    raw_content_type = response.headers.get("content-type", "")
-                    if status in {301, 302, 303, 307, 308}:
-                        location = response.headers.get("location", "").strip()
-                        if not location:
-                            raise WebPolicyError("redirect_missing_location", current.normalized_url)
-                        current = normalize_web_redirect_target(
-                            location,
-                            current_url=current.normalized_url,
-                            policy=policy,
+                response = await client.post(
+                    "/internal/fetch",
+                    json=EgressFetchRequest(
+                        url=current_target.normalized_url,
+                        channel=current_channel,
+                        headers=headers,
+                        max_body_bytes=settings.max_response_bytes + 1,
+                    ).model_dump(),
+                )
+                response.raise_for_status()
+                egress = EgressFetchResponse.model_validate(response.json())
+                actual_peer_ip = egress.actual_peer_ip
+                status = egress.http_status
+                raw_content_type = egress.headers.get("content-type", "")
+                body = base64.b64decode(egress.body_base64)
+                if status in {301, 302, 303, 307, 308}:
+                    location = egress.headers.get("location", "").strip()
+                    if not location:
+                        raise WebPolicyError(
+                            "redirect_missing_location",
+                            current.target.normalized_url,
                         )
-                        redirect_chain.append(current.normalized_url)
-                        continue
-                    if status < 200 or status >= 300:
-                        raise HTTPException(
-                            status_code=502,
-                            detail={
-                                "reason": "upstream_http_error",
-                                "http_status": status,
-                                "normalized_url": current.normalized_url,
-                                "resolved_ips": resolved_ips,
-                                "used_ip": used_ip,
-                                "redirect_chain": redirect_chain,
-                            },
+                    mediation_hops.append(
+                        _mediation_hop(
+                            current_target,
+                            channel=current_channel,
+                            approved_ips=egress.approved_ips,
+                            disposition="allowed",
+                            reason="redirect_hop_allowed",
+                            actual_peer_ip=actual_peer_ip,
+                            dialed_ip=egress.dialed_ip,
+                            http_status=status,
+                            enforcement_stage=egress.enforcement_stage,
+                            request_forwarded=egress.request_forwarded,
                         )
-                    if not _content_type_allowed(
-                        raw_content_type,
-                        allowed_content_types=settings.allowed_content_types,
-                    ):
-                        raise HTTPException(
-                            status_code=415,
-                            detail={
-                                "reason": "content_type_not_allowed",
-                                "content_type": _content_type(raw_content_type),
-                                "normalized_url": current.normalized_url,
-                                "resolved_ips": resolved_ips,
-                                "used_ip": used_ip,
-                                "redirect_chain": redirect_chain,
-                            },
-                        )
-                    body, truncated = await _read_limited_body(
-                        response,
-                        settings.max_response_bytes,
                     )
-                    decoded = _decode_text(
-                        body,
-                        content_type=raw_content_type,
-                        max_preview_chars=settings.max_preview_chars,
+                    current_target = normalize_web_redirect_target(
+                        location,
+                        current_url=current_target.normalized_url,
+                        policy=policy,
                     )
-                    return FetcherFetchResponse(
-                        normalized_url=current.normalized_url,
-                        final_url=str(response.url),
-                        scheme=current.scheme,
-                        host=current.host,
-                        port=current.port,
+                    current_channel = "redirect"
+                    redirect_chain.append(current_target.normalized_url)
+                    continue
+                mediation_hops.append(
+                    _mediation_hop(
+                        current_target,
+                        channel=current_channel,
+                        approved_ips=egress.approved_ips,
+                        disposition="allowed",
+                        reason="pre_connect_pinned",
+                        actual_peer_ip=actual_peer_ip,
+                        dialed_ip=egress.dialed_ip,
                         http_status=status,
-                        content_type=_content_type(raw_content_type),
-                        byte_count=len(body),
-                        truncated=truncated,
-                        redirect_chain=list(redirect_chain),
-                        resolved_ips=resolved_ips,
-                        used_ip=used_ip,
-                        content_sha256=hashlib.sha256(body).hexdigest(),
-                        text=decoded,
+                        enforcement_stage=egress.enforcement_stage,
+                        request_forwarded=egress.request_forwarded,
                     )
+                )
+                if status < 200 or status >= 300:
+                    raise HTTPException(
+                        status_code=502,
+                        detail={
+                            "reason": "upstream_http_error",
+                            "http_status": status,
+                            "normalized_url": current_target.normalized_url,
+                            "scheme": current_target.scheme,
+                            "host": current_target.host,
+                            "port": current_target.port,
+                            "resolved_ips": list(egress.approved_ips),
+                            "approved_ips": list(egress.approved_ips),
+                            "actual_peer_ip": actual_peer_ip,
+                            "used_ip": egress.dialed_ip,
+                            "request_forwarded": egress.request_forwarded,
+                            "enforcement_stage": egress.enforcement_stage,
+                            "mediation_hops": list(mediation_hops),
+                            "redirect_chain": redirect_chain,
+                        },
+                    )
+                if not _content_type_allowed(
+                    raw_content_type,
+                    allowed_content_types=settings.allowed_content_types,
+                ):
+                    raise HTTPException(
+                        status_code=415,
+                        detail={
+                            "reason": "content_type_not_allowed",
+                            "content_type": _content_type(raw_content_type),
+                            "normalized_url": current_target.normalized_url,
+                            "scheme": current_target.scheme,
+                            "host": current_target.host,
+                            "port": current_target.port,
+                            "resolved_ips": list(egress.approved_ips),
+                            "approved_ips": list(egress.approved_ips),
+                            "actual_peer_ip": actual_peer_ip,
+                            "used_ip": egress.dialed_ip,
+                            "request_forwarded": egress.request_forwarded,
+                            "enforcement_stage": egress.enforcement_stage,
+                            "mediation_hops": list(mediation_hops),
+                            "redirect_chain": redirect_chain,
+                        },
+                    )
+                truncated = len(body) > settings.max_response_bytes
+                body = body[: settings.max_response_bytes]
+                decoded = _decode_text(
+                    body,
+                    content_type=raw_content_type,
+                    max_preview_chars=settings.max_preview_chars,
+                )
+                return FetcherFetchResponse(
+                    normalized_url=current_target.normalized_url,
+                    final_url=current_target.normalized_url,
+                    scheme=current_target.scheme,
+                    host=current_target.host,
+                    port=current_target.port,
+                    http_status=status,
+                    content_type=_content_type(raw_content_type),
+                    byte_count=len(body),
+                    truncated=truncated,
+                    redirect_chain=list(redirect_chain),
+                    resolved_ips=list(egress.approved_ips),
+                    approved_ips=list(egress.approved_ips),
+                    actual_peer_ip=actual_peer_ip,
+                    used_ip=egress.dialed_ip,
+                    content_sha256=hashlib.sha256(body).hexdigest(),
+                    text=decoded,
+                    mediation_hops=list(mediation_hops),
+                )
+            except httpx.HTTPStatusError as exc:
+                detail = exc.response.json()["detail"]
+                mediation_hops.append(
+                    _mediation_hop(
+                        current_target,
+                        channel=current_channel,
+                        approved_ips=detail.get("approved_ips", []),
+                        disposition="denied",
+                        reason=detail.get("reason", "egress_denied"),
+                        actual_peer_ip=detail.get("actual_peer_ip"),
+                        dialed_ip=detail.get("dialed_ip"),
+                        http_status=detail.get("http_status"),
+                        enforcement_stage=detail.get("enforcement_stage", "unknown"),
+                        request_forwarded=bool(detail.get("request_forwarded", False)),
+                    )
+                )
+                raise HTTPException(
+                    status_code=exc.response.status_code,
+                    detail={
+                        "reason": detail.get("reason", "egress_denied"),
+                        "detail": detail.get("detail", ""),
+                        "normalized_url": detail.get("normalized_url", current_target.normalized_url),
+                        "scheme": detail.get("scheme", current_target.scheme),
+                        "host": detail.get("host", current_target.host),
+                        "port": detail.get("port", current_target.port),
+                        "resolved_ips": list(detail.get("approved_ips", [])),
+                        "approved_ips": list(detail.get("approved_ips", [])),
+                        "actual_peer_ip": detail.get("actual_peer_ip"),
+                        "used_ip": detail.get("dialed_ip"),
+                        "request_forwarded": bool(detail.get("request_forwarded", False)),
+                        "enforcement_stage": detail.get("enforcement_stage", "unknown"),
+                        "mediation_hops": list(mediation_hops),
+                        "redirect_chain": redirect_chain,
+                    },
+                ) from exc
             except WebPolicyError as exc:
+                mediation_hops.append(
+                    _mediation_hop(
+                        current_target,
+                        channel=current_channel,
+                        approved_ips=[],
+                        disposition="denied",
+                        reason=exc.reason,
+                        actual_peer_ip=None,
+                        dialed_ip=None,
+                        http_status=None,
+                        enforcement_stage="pre_connect",
+                        request_forwarded=False,
+                    )
+                )
                 raise HTTPException(
                     status_code=web_policy_status_code(exc.reason),
                     detail={
                         "reason": exc.reason,
                         "detail": exc.detail,
-                        "normalized_url": current.normalized_url,
-                        "scheme": current.scheme,
-                        "host": current.host,
-                        "port": current.port,
+                        "normalized_url": current_target.normalized_url,
+                        "scheme": current_target.scheme,
+                        "host": current_target.host,
+                        "port": current_target.port,
+                        "approved_ips": [],
+                        "actual_peer_ip": None,
+                        "used_ip": None,
+                        "request_forwarded": False,
+                        "enforcement_stage": "pre_connect",
+                        "mediation_hops": list(mediation_hops),
                         "redirect_chain": redirect_chain,
                     },
                 ) from exc
@@ -229,6 +372,7 @@ async def healthz() -> HealthReport:
         status="ok",
         stage=settings.stage,
         details={
+            "egress_url": settings.egress_url,
             "allowlist_hosts": list(settings.allowlist_hosts),
             "allowed_content_types": list(settings.allowed_content_types),
             "max_response_bytes": settings.max_response_bytes,

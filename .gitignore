@@ -1,6 +1,8 @@
 .DS_Store
 .pytest_cache/
 .venv/
+.env.local
+.env.provider.local
 __pycache__/
 *.egg-info/
 runtime/trusted_state/logs/*.jsonl

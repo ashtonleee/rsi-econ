@@ -1,0 +1,43 @@
+[
+  {
+    "kind": "bridge_status"
+  },
+  {
+    "kind": "bridge_browser_render",
+    "url": "{input_url}"
+  },
+  {
+    "kind": "bridge_browser_follow_href",
+    "source_url": "{input_url}",
+    "target_url": "{follow_target_url}"
+  },
+  {
+    "kind": "bridge_chat",
+    "model": "stage1-deterministic",
+    "message": "Q: {task}\nSource URL: {last_browser_follow_source_final_url}\nSource title: {last_browser_title}\nLink text: {last_browser_follow_matched_link_text}\nText:\n{last_browser_follow_rendered_text}\n\nAnswer using only the followed text. If details are missing, say so."
+  },
+  {
+    "kind": "write_file",
+    "path": "research/current_follow_answer.md",
+    "content_template": "# One-Hop Follow Answer Packet\n\nquestion={task}\nsource_input_url={input_url}\nsource_final_url={last_browser_follow_source_final_url}\nrequested_target_url={last_browser_follow_requested_target_url}\nmatched_link_text={last_browser_follow_matched_link_text}\nfollowed_final_url={last_browser_follow_final_url}\ntitle={last_browser_follow_title}\nrequest_id={last_browser_follow_request_id}\ntrace_id={last_browser_follow_trace_id}\ntext_bytes={last_browser_follow_text_bytes}\ntext_truncated={last_browser_follow_text_truncated}\nllm_model={last_bridge_chat_model}\n\n## Answer\n\n{last_bridge_chat}\n"
+  },
+  {
+    "kind": "write_file",
+    "path": "research/current_follow_capture.md",
+    "content_template": "# One-Hop Follow Capture Packet\n\ntask={task}\nsource_input_url={input_url}\nsource_final_url={last_browser_follow_source_final_url}\nrequested_target_url={last_browser_follow_requested_target_url}\nmatched_link_text={last_browser_follow_matched_link_text}\nfollowed_final_url={last_browser_follow_final_url}\ntitle={last_browser_follow_title}\nrequest_id={last_browser_follow_request_id}\ntrace_id={last_browser_follow_trace_id}\ntext_bytes={last_browser_follow_text_bytes}\ntext_truncated={last_browser_follow_text_truncated}\n"
+  },
+  {
+    "kind": "write_file",
+    "path": "research/current_follow_rendered_text.txt",
+    "content_template": "{last_browser_follow_rendered_text}"
+  },
+  {
+    "kind": "write_binary_base64",
+    "path": "research/current_follow_screenshot.png",
+    "base64_template": "{last_browser_follow_screenshot_base64}"
+  },
+  {
+    "kind": "finish",
+    "summary": "stage6 one-hop follow answer packet complete"
+  }
+]

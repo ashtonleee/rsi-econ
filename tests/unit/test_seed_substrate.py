@@ -1,3 +1,4 @@
+import base64
 import asyncio
 import json
 import os
@@ -6,7 +7,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 import pytest
 
-from shared.config import agent_settings
+from shared.config import DEFAULT_LLM_BUDGET_TOKEN_CAP, agent_settings
+from shared.mock_llm import deterministic_usage
 from shared.schemas import (
     AgentRunEventReceipt,
     BrowserFollowHrefResponse,
@@ -35,6 +37,7 @@ class FakeBridgeClient:
     def __init__(self):
         self.status_calls = 0
         self.chat_calls = 0
+        self.chat_requests: list[dict[str, str]] = []
         self.fetch_calls = 0
         self.browser_render_calls = 0
         self.browser_follow_href_calls = 0
@@ -165,6 +168,7 @@ class FakeBridgeClient:
 
     async def chat(self, *, model: str, message: str) -> ChatCompletionResponse:
         self.chat_calls += 1
+        self.chat_requests.append({"model": model, "message": message})
         reply = ChatMessage(role="assistant", content=f"scripted reply: {message}")
         return ChatCompletionResponse(
             id="chatcmpl-scripted",
@@ -328,6 +332,34 @@ def test_workspace_tools_cannot_escape_mutable_workspace(tmp_path):
         workspace.list_files("../../")
 
 
+@pytest.mark.fast
+def test_workspace_tools_reject_symlink_escapes(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    workspace_dir.mkdir()
+    (outside_dir / "secret.txt").write_text("secret\n", encoding="ascii")
+    (outside_dir / "nested").mkdir()
+
+    try:
+        (workspace_dir / "linked_secret.txt").symlink_to(outside_dir / "secret.txt")
+        (workspace_dir / "linked_dir").symlink_to(
+            outside_dir / "nested",
+            target_is_directory=True,
+        )
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable in test environment: {exc}")
+
+    workspace = WorkspaceTools(workspace_dir)
+
+    with pytest.raises(ValueError):
+        workspace.read_file("linked_secret.txt")
+    with pytest.raises(ValueError):
+        workspace.write_file("linked_dir/new.txt", "escape\n")
+    with pytest.raises(ValueError):
+        workspace.list_files("linked_dir")
+
+
 def test_bounded_command_runner_enforces_cwd_timeout_and_output_limit(tmp_path):
     runner = BoundedCommandRunner(tmp_path, default_timeout_seconds=1.0, output_limit_bytes=64)
     env = runner._env()
@@ -355,6 +387,37 @@ def test_bounded_command_runner_enforces_cwd_timeout_and_output_limit(tmp_path):
     )
     assert output_result.stdout_truncated is True
     assert len(output_result.stdout) <= 40
+
+
+@pytest.mark.fast
+def test_bounded_command_runner_scrubs_host_secret_and_proxy_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "top-secret")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.test:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:8443")
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.test:1080")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+
+    runner = BoundedCommandRunner(tmp_path)
+    result = runner.run(
+        [
+            "python",
+            "-c",
+            (
+                "import json, os\n"
+                "keys = ['OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']\n"
+                "print(json.dumps({key: os.environ.get(key) for key in keys}, sort_keys=True))\n"
+            ),
+        ]
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {
+        "ALL_PROXY": None,
+        "HTTPS_PROXY": None,
+        "HTTP_PROXY": None,
+        "NO_PROXY": None,
+        "OPENAI_API_KEY": None,
+    }
 
 
 def test_agent_health_reports_workspace_writable_and_runtime_code_read_only(monkeypatch, tmp_path):
@@ -523,6 +586,109 @@ def test_scripted_planner_can_render_browser_via_bridge_and_write_artifacts(tmp_
     assert "Rendered browser text preview" in payload
 
 
+def test_scripted_planner_can_capture_single_url_browser_packet(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    make_local_task_workspace(workspace_dir)
+
+    class CaptureBridgeClient(FakeBridgeClient):
+        async def browser_render(self, *, url: str) -> BrowserRenderResponse:
+            self.browser_render_calls += 1
+            rendered_text = "Packet heading\n" + ("detail line\n" * 32)
+            screenshot_base64 = (
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2Wb6wAAAAASUVORK5CYII="
+            )
+            return BrowserRenderResponse(
+                request_id="browser-capture-req-1",
+                trace_id="browser-capture-trace-1",
+                normalized_url=url,
+                final_url=url,
+                http_status=200,
+                page_title="Capture Packet Title",
+                meta_description="Capture packet description",
+                rendered_text=rendered_text,
+                rendered_text_sha256="capture-text-hash",
+                text_bytes=len(rendered_text.encode("utf-8")),
+                text_truncated=False,
+                screenshot_png_base64=screenshot_base64,
+                screenshot_sha256="capture-image-hash",
+                screenshot_bytes=len(base64.b64decode(screenshot_base64)),
+                redirect_chain=[],
+                observed_hosts=["example.com"],
+                resolved_ips=["93.184.216.34"],
+                followable_links=[],
+            )
+
+    bridge = CaptureBridgeClient()
+    planner = ScriptedPlanner(
+        [
+            PlanAction(kind="bridge_status"),
+            PlanAction(kind="bridge_browser_render", params={"url": "{input_url}"}),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_capture.md",
+                    "content_template": (
+                        "input_url={input_url}\n"
+                        "final_url={last_browser_final_url}\n"
+                        "request_id={last_browser_request_id}\n"
+                        "trace_id={last_browser_trace_id}\n"
+                        "text_bytes={last_browser_text_bytes}\n"
+                        "text_truncated={last_browser_text_truncated}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_rendered_text.txt",
+                    "content_template": "{last_browser_rendered_text}",
+                },
+            ),
+            PlanAction(
+                kind="write_binary_base64",
+                params={
+                    "path": "research/current_screenshot.png",
+                    "base64_template": "{last_browser_screenshot_base64}",
+                },
+            ),
+            PlanAction(kind="finish", params={"summary": "capture packet complete"}),
+        ]
+    )
+    runner = SeedRunner(
+        workspace_dir=workspace_dir,
+        bridge_client=bridge,
+        planner=planner,
+        max_steps=6,
+    )
+
+    input_url = "https://example.com/reference"
+    result = asyncio.run(
+        runner.run("capture one allowlisted page", input_url=input_url)
+    )
+
+    assert result.success is True
+    assert bridge.browser_render_calls == 1
+    summary = json.loads(
+        (workspace_dir / "run_outputs" / "latest_seed_run.json").read_text(encoding="ascii")
+    )
+    assert summary["input_url"] == input_url
+
+    report = (workspace_dir / "research" / "current_capture.md").read_text(encoding="utf-8")
+    captured_text = (workspace_dir / "research" / "current_rendered_text.txt").read_text(
+        encoding="utf-8"
+    )
+    screenshot = workspace_dir / "research" / "current_screenshot.png"
+
+    assert f"input_url={input_url}" in report
+    assert "request_id=browser-capture-req-1" in report
+    assert "trace_id=browser-capture-trace-1" in report
+    assert "text_truncated=False" in report
+    assert captured_text.startswith("Packet heading\n")
+    assert captured_text.endswith("detail line\n")
+    assert len(captured_text) > 200
+    assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def test_scripted_planner_can_follow_browser_href_via_bridge_and_write_artifacts(tmp_path):
     workspace_dir = tmp_path / "workspace"
     make_local_task_workspace(workspace_dir)
@@ -585,3 +751,360 @@ def test_scripted_planner_can_follow_browser_href_via_bridge_and_write_artifacts
     assert "https://example.com/follow-target" in payload
     assert "Fixture Browser Follow Title" in payload
     assert "browser-follow-req-1" in payload
+
+
+def test_scripted_planner_can_build_single_source_answer_packet(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    make_local_task_workspace(workspace_dir)
+
+    class ReturnedModelBridgeClient(FakeBridgeClient):
+        async def chat(self, *, model: str, message: str) -> ChatCompletionResponse:
+            response = await super().chat(model=model, message=message)
+            return response.model_copy(update={"model": f"{model}-resolved"})
+
+    bridge = ReturnedModelBridgeClient()
+    planner = ScriptedPlanner(
+        [
+            PlanAction(kind="bridge_status"),
+            PlanAction(kind="bridge_browser_render", params={"url": "{input_url}"}),
+            PlanAction(
+                kind="bridge_chat",
+                params={
+                    "model": "stage1-deterministic",
+                    "message": (
+                        "Q: {task}\n"
+                        "Title: {last_browser_title}\n"
+                        "Text:\n{last_browser_rendered_text}"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_answer.md",
+                    "content_template": (
+                        "question={task}\n"
+                        "input_url={input_url}\n"
+                        "final_url={last_browser_final_url}\n"
+                        "title={last_browser_title}\n"
+                        "request_id={last_browser_request_id}\n"
+                        "trace_id={last_browser_trace_id}\n"
+                        "text_bytes={last_browser_text_bytes}\n"
+                        "text_truncated={last_browser_text_truncated}\n"
+                        "llm_model={last_bridge_chat_model}\n"
+                        "answer={last_bridge_chat}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_capture.md",
+                    "content_template": (
+                        "input_url={input_url}\n"
+                        "final_url={last_browser_final_url}\n"
+                        "request_id={last_browser_request_id}\n"
+                        "trace_id={last_browser_trace_id}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_rendered_text.txt",
+                    "content_template": "{last_browser_rendered_text}",
+                },
+            ),
+            PlanAction(
+                kind="write_binary_base64",
+                params={
+                    "path": "research/current_screenshot.png",
+                    "base64_template": "{last_browser_screenshot_base64}",
+                },
+            ),
+            PlanAction(kind="finish", params={"summary": "answer packet complete"}),
+        ]
+    )
+    runner = SeedRunner(
+        workspace_dir=workspace_dir,
+        bridge_client=bridge,
+        planner=planner,
+        max_steps=8,
+    )
+
+    input_url = "https://example.com/reference"
+    question = "What does this page say?"
+    result = asyncio.run(runner.run(question, input_url=input_url))
+
+    assert result.success is True
+    assert bridge.browser_render_calls == 1
+    assert bridge.chat_calls == 1
+    assert bridge.chat_requests[-1]["model"] == "stage1-deterministic"
+    assert f"Q: {question}" in bridge.chat_requests[-1]["message"]
+    assert "Title: Fixture Browser Title" in bridge.chat_requests[-1]["message"]
+    assert "Rendered browser text preview" in bridge.chat_requests[-1]["message"]
+    assert (
+        deterministic_usage(
+            [ChatMessage(role="user", content=bridge.chat_requests[-1]["message"])]
+        ).total_tokens
+        <= DEFAULT_LLM_BUDGET_TOKEN_CAP
+    )
+
+    summary = json.loads(
+        (workspace_dir / "run_outputs" / "latest_seed_run.json").read_text(encoding="ascii")
+    )
+    assert summary["input_url"] == input_url
+    assert any(step["kind"] == "bridge_browser_render" for step in summary["steps"])
+    assert any(step["kind"] == "bridge_chat" for step in summary["steps"])
+    assert any(
+        step["kind"] == "bridge_chat"
+        and step["result"]["model"] == "stage1-deterministic-resolved"
+        for step in summary["steps"]
+    )
+
+    answer = (workspace_dir / "research" / "current_answer.md").read_text(encoding="utf-8")
+    capture = (workspace_dir / "research" / "current_capture.md").read_text(encoding="utf-8")
+    captured_text = (workspace_dir / "research" / "current_rendered_text.txt").read_text(
+        encoding="utf-8"
+    )
+    screenshot = workspace_dir / "research" / "current_screenshot.png"
+
+    assert f"question={question}" in answer
+    assert f"input_url={input_url}" in answer
+    assert "request_id=browser-req-1" in answer
+    assert "trace_id=browser-trace-1" in answer
+    assert "llm_model=stage1-deterministic-resolved" in answer
+    assert "answer=scripted reply:" in answer
+    assert f"input_url={input_url}" in capture
+    assert captured_text == "Rendered browser text preview"
+    assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_scripted_planner_can_build_follow_answer_packet(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    make_local_task_workspace(workspace_dir)
+
+    class FollowAnswerBridgeClient(FakeBridgeClient):
+        async def browser_render(self, *, url: str) -> BrowserRenderResponse:
+            self.browser_render_calls += 1
+            screenshot_base64 = (
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2Wb6wAAAAASUVORK5CYII="
+            )
+            return BrowserRenderResponse(
+                request_id="browser-follow-source-req-1",
+                trace_id="browser-follow-source-trace-1",
+                normalized_url=url,
+                final_url=url,
+                http_status=200,
+                page_title="Follow Source Title",
+                meta_description="Follow source description",
+                rendered_text="SOURCE PAGE ONLY",
+                rendered_text_sha256="follow-source-text-hash",
+                text_bytes=len("SOURCE PAGE ONLY".encode("utf-8")),
+                text_truncated=False,
+                screenshot_png_base64=screenshot_base64,
+                screenshot_sha256="follow-source-image-hash",
+                screenshot_bytes=len(base64.b64decode(screenshot_base64)),
+                redirect_chain=[],
+                observed_hosts=["example.com"],
+                resolved_ips=["93.184.216.34"],
+                followable_links=[
+                    BrowserFollowLink(
+                        text="Follow same origin target",
+                        target_url="https://example.com/follow-target",
+                        same_origin=True,
+                    )
+                ],
+            )
+
+        async def browser_follow_href(
+            self,
+            *,
+            source_url: str,
+            target_url: str,
+        ) -> BrowserFollowHrefResponse:
+            self.browser_follow_href_calls += 1
+            screenshot_base64 = (
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2Wb6wAAAAASUVORK5CYII="
+            )
+            return BrowserFollowHrefResponse(
+                request_id="browser-follow-answer-req-1",
+                trace_id="browser-follow-answer-trace-1",
+                source_url=source_url,
+                source_final_url=source_url,
+                requested_target_url=target_url,
+                matched_link_text="Follow same origin target",
+                follow_hop_count=1,
+                navigation_history=[source_url, target_url],
+                normalized_url=target_url,
+                final_url=target_url,
+                http_status=200,
+                page_title="Follow Answer Target Title",
+                meta_description="Follow answer target description",
+                rendered_text="FOLLOWED PAGE ONLY",
+                rendered_text_sha256="follow-answer-text-hash",
+                text_bytes=len("FOLLOWED PAGE ONLY".encode("utf-8")),
+                text_truncated=False,
+                screenshot_png_base64=screenshot_base64,
+                screenshot_sha256="follow-answer-image-hash",
+                screenshot_bytes=len(base64.b64decode(screenshot_base64)),
+                redirect_chain=[],
+                observed_hosts=["example.com"],
+                resolved_ips=["93.184.216.34"],
+            )
+
+        async def chat(self, *, model: str, message: str) -> ChatCompletionResponse:
+            response = await super().chat(model=model, message=message)
+            return response.model_copy(update={"model": f"{model}-resolved"})
+
+    bridge = FollowAnswerBridgeClient()
+    planner = ScriptedPlanner(
+        [
+            PlanAction(kind="bridge_status"),
+            PlanAction(kind="bridge_browser_render", params={"url": "{input_url}"}),
+            PlanAction(
+                kind="bridge_browser_follow_href",
+                params={
+                    "source_url": "{input_url}",
+                    "target_url": "{follow_target_url}",
+                },
+            ),
+            PlanAction(
+                kind="bridge_chat",
+                params={
+                    "model": "stage1-deterministic",
+                    "message": (
+                        "Q: {task}\n"
+                        "Source input URL: {input_url}\n"
+                        "Source final URL: {last_browser_follow_source_final_url}\n"
+                        "Requested target URL: {follow_target_url}\n"
+                        "Matched link text: {last_browser_follow_matched_link_text}\n"
+                        "Followed final URL: {last_browser_follow_final_url}\n"
+                        "Page title: {last_browser_follow_title}\n"
+                        "Text:\n{last_browser_follow_rendered_text}"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_follow_answer.md",
+                    "content_template": (
+                        "question={task}\n"
+                        "source_input_url={input_url}\n"
+                        "source_final_url={last_browser_follow_source_final_url}\n"
+                        "requested_target_url={follow_target_url}\n"
+                        "matched_link_text={last_browser_follow_matched_link_text}\n"
+                        "followed_final_url={last_browser_follow_final_url}\n"
+                        "title={last_browser_follow_title}\n"
+                        "request_id={last_browser_follow_request_id}\n"
+                        "trace_id={last_browser_follow_trace_id}\n"
+                        "text_bytes={last_browser_follow_text_bytes}\n"
+                        "text_truncated={last_browser_follow_text_truncated}\n"
+                        "llm_model={last_bridge_chat_model}\n"
+                        "answer={last_bridge_chat}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_follow_capture.md",
+                    "content_template": (
+                        "source_input_url={input_url}\n"
+                        "source_final_url={last_browser_follow_source_final_url}\n"
+                        "requested_target_url={follow_target_url}\n"
+                        "matched_link_text={last_browser_follow_matched_link_text}\n"
+                        "followed_final_url={last_browser_follow_final_url}\n"
+                        "title={last_browser_follow_title}\n"
+                        "request_id={last_browser_follow_request_id}\n"
+                        "trace_id={last_browser_follow_trace_id}\n"
+                        "text_bytes={last_browser_follow_text_bytes}\n"
+                        "text_truncated={last_browser_follow_text_truncated}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_follow_rendered_text.txt",
+                    "content_template": "{last_browser_follow_rendered_text}",
+                },
+            ),
+            PlanAction(
+                kind="write_binary_base64",
+                params={
+                    "path": "research/current_follow_screenshot.png",
+                    "base64_template": "{last_browser_follow_screenshot_base64}",
+                },
+            ),
+            PlanAction(kind="finish", params={"summary": "follow answer packet complete"}),
+        ]
+    )
+    runner = SeedRunner(
+        workspace_dir=workspace_dir,
+        bridge_client=bridge,
+        planner=planner,
+        max_steps=10,
+    )
+
+    input_url = "https://example.com/follow-source"
+    follow_target_url = "https://example.com/follow-target"
+    question = "What does the followed page say?"
+    result = asyncio.run(
+        runner.run(
+            question,
+            input_url=input_url,
+            follow_target_url=follow_target_url,
+        )
+    )
+
+    assert result.success is True
+    assert bridge.browser_render_calls == 1
+    assert bridge.browser_follow_href_calls == 1
+    assert bridge.chat_calls == 1
+    assert bridge.chat_requests[-1]["model"] == "stage1-deterministic"
+    assert f"Q: {question}" in bridge.chat_requests[-1]["message"]
+    assert "Matched link text: Follow same origin target" in bridge.chat_requests[-1]["message"]
+    assert "Text:\nFOLLOWED PAGE ONLY" in bridge.chat_requests[-1]["message"]
+    assert "SOURCE PAGE ONLY" not in bridge.chat_requests[-1]["message"]
+
+    summary = json.loads(
+        (workspace_dir / "run_outputs" / "latest_seed_run.json").read_text(encoding="ascii")
+    )
+    assert summary["input_url"] == input_url
+    assert summary["follow_target_url"] == follow_target_url
+    assert any(step["kind"] == "bridge_browser_follow_href" for step in summary["steps"])
+    assert any(
+        step["kind"] == "bridge_chat"
+        and step["result"]["model"] == "stage1-deterministic-resolved"
+        for step in summary["steps"]
+    )
+
+    answer = (workspace_dir / "research" / "current_follow_answer.md").read_text(
+        encoding="utf-8"
+    )
+    capture = (workspace_dir / "research" / "current_follow_capture.md").read_text(
+        encoding="utf-8"
+    )
+    captured_text = (
+        workspace_dir / "research" / "current_follow_rendered_text.txt"
+    ).read_text(encoding="utf-8")
+    screenshot = workspace_dir / "research" / "current_follow_screenshot.png"
+
+    assert f"question={question}" in answer
+    assert f"source_input_url={input_url}" in answer
+    assert f"requested_target_url={follow_target_url}" in answer
+    assert "matched_link_text=Follow same origin target" in answer
+    assert "title=Follow Answer Target Title" in answer
+    assert "request_id=browser-follow-answer-req-1" in answer
+    assert "trace_id=browser-follow-answer-trace-1" in answer
+    assert "text_bytes=18" in answer
+    assert "text_truncated=False" in answer
+    assert "llm_model=stage1-deterministic-resolved" in answer
+    assert "answer=scripted reply:" in answer
+    assert f"source_input_url={input_url}" in capture
+    assert f"requested_target_url={follow_target_url}" in capture
+    assert "followed_final_url=https://example.com/follow-target" in capture
+    assert captured_text == "FOLLOWED PAGE ONLY"
+    assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")

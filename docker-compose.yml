@@ -15,6 +15,7 @@ services:
       RSI_LITELLM_URL: http://litellm:4000
       RSI_FETCHER_URL: http://fetcher:8082
       RSI_BROWSER_URL: http://browser:8083
+      RSI_EGRESS_URL: http://egress:8084
       RSI_AGENT_URL: http://agent:8001
       RSI_LLM_BUDGET_TOKEN_CAP: ${RSI_LLM_BUDGET_TOKEN_CAP:-100}
       RSI_BUDGET_UNIT: mock_tokens
@@ -23,13 +24,15 @@ services:
       RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
       RSI_ENABLE_DEBUG_PROBES: ${RSI_ENABLE_DEBUG_PROBES:-0}
     volumes:
-      - ./runtime/trusted_state:/var/lib/rsi/trusted_state
+      - ${RSI_TRUSTED_STATE_HOST_DIR:-./runtime/trusted_state}:/var/lib/rsi/trusted_state
     depends_on:
       litellm:
         condition: service_healthy
       fetcher:
         condition: service_healthy
       browser:
+        condition: service_healthy
+      egress:
         condition: service_healthy
     healthcheck:
       test:
@@ -56,7 +59,9 @@ services:
       - --port
       - "4000"
     environment:
-      OPENAI_API_KEY: stage1-sentinel-provider-key
+      RSI_LITELLM_RESPONSE_MODE: ${RSI_LITELLM_RESPONSE_MODE:-deterministic_mock}
+      RSI_OPENAI_BASE_URL: ${RSI_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-stage1-sentinel-provider-key}
     healthcheck:
       test:
         - CMD
@@ -68,6 +73,7 @@ services:
       retries: 10
     networks:
       - trusted_net
+      - egress_net
 
   fetcher:
     build:
@@ -82,11 +88,14 @@ services:
       - "8082"
     environment:
       RSI_FETCHER_URL: http://fetcher:8082
+      RSI_EGRESS_URL: http://egress:8084
       RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
       RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
       RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
     depends_on:
       webfixture:
+        condition: service_healthy
+      egress:
         condition: service_healthy
     healthcheck:
       test:
@@ -99,7 +108,6 @@ services:
       retries: 10
     networks:
       - trusted_net
-      - egress_net
 
   browser:
     build:
@@ -114,6 +122,7 @@ services:
       - "8083"
     environment:
       RSI_BROWSER_URL: http://browser:8083
+      RSI_EGRESS_URL: http://egress:8084
       RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
       RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
       RSI_BROWSER_VIEWPORT_WIDTH: ${RSI_BROWSER_VIEWPORT_WIDTH:-1280}
@@ -131,12 +140,46 @@ services:
     depends_on:
       webfixture:
         condition: service_healthy
+      egress:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
         - python
         - -c
         - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8083/healthz", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - trusted_net
+
+  egress:
+    build:
+      context: .
+      dockerfile: trusted/egress/Dockerfile
+    command:
+      - uvicorn
+      - trusted.egress.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8084"
+    environment:
+      RSI_EGRESS_URL: http://egress:8084
+      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
+      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
+      RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
+      RSI_EGRESS_TEST_IP_OVERRIDES: ${RSI_EGRESS_TEST_IP_OVERRIDES:-}
+    depends_on:
+      webfixture:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8084/healthz", timeout=2).read()
       interval: 5s
       timeout: 3s
       retries: 10
@@ -162,7 +205,7 @@ services:
       HOME: /tmp
       TMPDIR: /tmp
     volumes:
-      - ./untrusted/agent_workspace:/workspace/agent
+      - ${RSI_AGENT_WORKSPACE_HOST_DIR:-./untrusted/agent_workspace}:/workspace/agent
     read_only: true
     tmpfs:
       - /tmp

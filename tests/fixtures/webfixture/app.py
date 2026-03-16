@@ -1,13 +1,36 @@
-from fastapi import FastAPI
+from collections import defaultdict
+import time
+
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 
 app = FastAPI(title="stage5-web-fixture")
+REQUEST_COUNTS: dict[str, int] = defaultdict(int)
+FIXTURE_PROVIDER_RETURNED_MODEL = "openai/gpt-4.1-mini-fixture-2026-03-16"
+
+
+@app.middleware("http")
+async def count_requests(request: Request, call_next):
+    if not request.url.path.startswith("/debug/") and request.url.path != "/healthz":
+        REQUEST_COUNTS[request.url.path] += 1
+    return await call_next(request)
 
 
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+@app.post("/debug/reset-counters")
+async def reset_counters():
+    REQUEST_COUNTS.clear()
+    return {"status": "ok"}
+
+
+@app.get("/debug/counters")
+async def counters():
+    return {"counts": dict(REQUEST_COUNTS)}
 
 
 @app.get("/allowed")
@@ -20,9 +43,52 @@ async def redirect_blocked():
     return RedirectResponse("http://blocked.test/blocked", status_code=302)
 
 
+@app.get("/redirect-allowed-two")
+async def redirect_allowed_two():
+    return RedirectResponse("http://allowed-two.test/allowed", status_code=302)
+
+
 @app.get("/blocked")
 async def blocked():
     return PlainTextResponse("blocked host body\n")
+
+
+@app.get("/provider/v1/models")
+async def provider_models():
+    return {
+        "object": "list",
+        "data": [{"id": FIXTURE_PROVIDER_RETURNED_MODEL, "object": "model"}],
+    }
+
+
+@app.post("/provider/v1/chat/completions")
+async def provider_chat_completions(request: Request):
+    payload = await request.json()
+    messages = payload.get("messages", [])
+    last_message = ""
+    if messages:
+        last_message = str(messages[-1].get("content", ""))
+    return {
+        "id": "chatcmpl-fixture-provider",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": FIXTURE_PROVIDER_RETURNED_MODEL,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": f"Fixture provider reply: {last_message[:120]}",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 11,
+            "total_tokens": 34,
+        },
+    }
 
 
 @app.get("/binary")
@@ -223,7 +289,11 @@ async def browser_follow_download_target():
     <p>Download follow target.</p>
     <script>
       setTimeout(() => {
-        window.location = "http://allowed.test/browser/download.bin";
+        const link = document.createElement("a");
+        link.href = "http://allowed.test/browser/download.bin";
+        link.download = "fixture.bin";
+        document.body.appendChild(link);
+        link.click();
       }, 50);
     </script>
   </body>
@@ -313,7 +383,11 @@ async def browser_download_page():
     <p>Download attempt fixture.</p>
     <script>
       setTimeout(() => {
-        window.location = "http://allowed.test/browser/download.bin";
+        const link = document.createElement("a");
+        link.href = "http://allowed.test/browser/download.bin";
+        link.download = "fixture.bin";
+        document.body.appendChild(link);
+        link.click();
       }, 50);
     </script>
   </body>
@@ -336,6 +410,422 @@ async def browser_redirect_blocked():
     return RedirectResponse("http://blocked.test/browser/rendered", status_code=302)
 
 
+@app.get("/browser/redirect-allowed-two")
+async def browser_redirect_allowed_two():
+    return RedirectResponse(
+        "http://allowed-two.test/browser/cross-origin-target",
+        status_code=302,
+    )
+
+
 @app.get("/browser/blocked-image.png")
 async def browser_blocked_image():
     return Response(content=b"\x89PNG\r\n\x1a\n", media_type="image/png")
+
+
+@app.get("/browser/render-meta-refresh")
+async def browser_render_meta_refresh():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Render meta refresh fixture</title>
+    <meta http-equiv="refresh" content="0.1; url=http://blocked.test/browser/rendered" />
+  </head>
+  <body>
+    <main>
+      <h1>Render meta refresh fixture</h1>
+      <p>This page attempts an additional top-level navigation.</p>
+    </main>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/render-js-redirect")
+async def browser_render_js_redirect():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Render JS redirect fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Render JS redirect fixture</h1>
+      <p>This page attempts an additional top-level navigation via JS.</p>
+    </main>
+    <script>
+      setTimeout(() => {
+        window.location = "http://blocked.test/browser/rendered";
+      }, 50);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-iframe-blocked")
+async def browser_channel_iframe_blocked():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Iframe channel fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Iframe channel fixture</h1>
+      <iframe src="http://blocked.test/browser/frame-target" title="blocked frame"></iframe>
+    </main>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-fetch-xhr")
+async def browser_channel_fetch_xhr():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Fetch XHR channel fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Fetch/XHR channel fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        fetch("http://blocked.test/browser/xhr-target").catch(() => {});
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", "http://blocked.test/browser/xhr-target");
+        xhr.send();
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-form-submit")
+async def browser_channel_form_submit():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Form submission fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Form submission fixture</h1>
+      <form id="blocked-form" action="http://blocked.test/browser/form-target" method="post">
+        <input type="text" name="payload" value="fixture" />
+      </form>
+    </main>
+    <script>
+      setTimeout(() => {
+        document.getElementById("blocked-form").submit();
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-websocket")
+async def browser_channel_websocket():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>WebSocket fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>WebSocket fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        try {
+          new WebSocket("ws://blocked.test/browser/socket");
+        } catch (err) {}
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-eventsource")
+async def browser_channel_eventsource():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>EventSource fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>EventSource fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        try {
+          new EventSource("http://blocked.test/browser/events");
+        } catch (err) {}
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-beacon")
+async def browser_channel_beacon():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Beacon fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Beacon fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        navigator.sendBeacon("http://blocked.test/browser/beacon", "fixture");
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-popup")
+async def browser_channel_popup():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Popup channel fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Popup channel fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        window.open("http://allowed.test/browser/popup-target", "_blank");
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-download")
+async def browser_channel_download():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Download channel fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Download channel fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        const link = document.createElement("a");
+        link.href = "http://allowed.test/browser/download.bin";
+        link.download = "fixture.bin";
+        document.body.appendChild(link);
+        link.click();
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-upload")
+async def browser_channel_upload():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Upload channel fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Upload channel fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        const input = document.createElement("input");
+        input.type = "file";
+        document.body.appendChild(input);
+        input.click();
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-prefetch")
+async def browser_channel_prefetch():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Prefetch fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Prefetch fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        const prefetch = document.createElement("link");
+        prefetch.rel = "prefetch";
+        prefetch.href = "http://blocked.test/browser/prefetch-target";
+        document.head.appendChild(prefetch);
+
+        const preconnect = document.createElement("link");
+        preconnect.rel = "preconnect";
+        preconnect.href = "http://blocked.test";
+        document.head.appendChild(preconnect);
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-external-protocol")
+async def browser_channel_external_protocol():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>External protocol fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>External protocol fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        const link = document.createElement("a");
+        link.href = "mailto:hello@example.com";
+        document.body.appendChild(link);
+        link.click();
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/channel-worker")
+async def browser_channel_worker():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Worker fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Worker fixture</h1>
+    </main>
+    <script>
+      setTimeout(() => {
+        try {
+          new Worker("http://blocked.test/browser/worker.js");
+        } catch (err) {}
+      }, 25);
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/frame-target")
+async def browser_frame_target():
+    return HTMLResponse("<html><body><p>blocked frame target</p></body></html>")
+
+
+@app.get("/browser/xhr-target")
+async def browser_xhr_target():
+    return PlainTextResponse("xhr target\n")
+
+
+@app.post("/browser/form-target")
+async def browser_form_target():
+    return PlainTextResponse("form target\n")
+
+
+@app.get("/browser/events")
+async def browser_events():
+    return Response(
+        content="event: message\ndata: fixture\n\n",
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/browser/beacon")
+async def browser_beacon():
+    return PlainTextResponse("beacon target\n")
+
+
+@app.get("/browser/prefetch-target")
+async def browser_prefetch_target():
+    return PlainTextResponse("prefetch target\n")
+
+
+@app.get("/browser/worker.js")
+async def browser_worker_script():
+    return Response(
+        content='self.postMessage("worker ready");',
+        media_type="application/javascript",
+    )
+
+
+@app.websocket("/browser/socket")
+async def browser_socket(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_text("fixture")
+    await websocket.close()

@@ -2,6 +2,8 @@ import json
 import multiprocessing
 from pathlib import Path
 
+import pytest
+
 from trusted.state.store import TrustedStateManager
 
 
@@ -44,6 +46,101 @@ def _append_events_worker(
             )
     except Exception as exc:
         error_queue.put(f"{type(exc).__name__}: {exc}")
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize(
+    "preexisting_state",
+    [
+        "{not valid json\n",
+        json.dumps(
+            {
+                "marker": "stale_state",
+                "budget": {"spent": 999, "remaining": 0, "exhausted": True},
+                "recent_requests": [{"request_id": "stale-request"}],
+            }
+        )
+        + "\n",
+    ],
+    ids=["invalid-json", "stale-json"],
+)
+def test_trusted_state_manager_rebuilds_from_canonical_log_when_snapshot_is_corrupt(
+    tmp_path,
+    preexisting_state,
+):
+    log_path = tmp_path / "logs" / "bridge_events.jsonl"
+    state_path = tmp_path / "state" / "operational_state.json"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(preexisting_state, encoding="ascii")
+
+    canonical_events = [
+        {
+            "timestamp": "2026-03-16T00:00:00+00:00",
+            "event_type": "llm_call",
+            "request_id": "req-llm",
+            "trace_id": "trace-llm",
+            "actor": "agent",
+            "source_service": "bridge",
+            "outcome": "success",
+            "summary": {
+                "model": "stage2-deterministic",
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 3,
+                    "total_tokens": 7,
+                },
+            },
+        },
+        {
+            "timestamp": "2026-03-16T00:00:01+00:00",
+            "event_type": "budget_update",
+            "request_id": "req-llm",
+            "trace_id": "trace-llm",
+            "actor": "bridge",
+            "source_service": "bridge",
+            "outcome": "success",
+            "summary": {
+                "budget": {
+                    "total": 30,
+                    "spent": 7,
+                    "remaining": 23,
+                    "exhausted": False,
+                },
+                "usage": {
+                    "total_prompt_tokens": 4,
+                    "total_completion_tokens": 3,
+                    "total_tokens": 7,
+                },
+            },
+        },
+    ]
+    log_path.write_text(
+        "".join(json.dumps(event, sort_keys=True) + "\n" for event in canonical_events),
+        encoding="ascii",
+    )
+
+    manager = TrustedStateManager(
+        canonical_log_path=log_path,
+        operational_state_path=state_path,
+        budget_total=30,
+        budget_unit="mock_tokens",
+        stage="stage6_read_only_browser",
+        surfaces={"canonical_logging": "active_canonical_event_log"},
+    )
+
+    snapshot = manager.snapshot()
+    rewritten = json.loads(state_path.read_text(encoding="ascii"))
+
+    assert snapshot["budget"]["spent"] == 7
+    assert snapshot["budget"]["remaining"] == 23
+    assert snapshot["budget"]["total_tokens"] == 7
+    assert snapshot["counters"]["llm_calls_total"] == 1
+    assert snapshot["counters"]["budget_updates"] == 1
+    assert snapshot["recent_requests"][0]["event_type"] == "budget_update"
+    assert snapshot == rewritten
+    assert rewritten.get("marker") != "stale_state"
+    assert rewritten["recent_requests"][0]["request_id"] == "req-llm"
 
 
 def test_trusted_state_manager_materializes_operational_state_from_canonical_log(tmp_path):

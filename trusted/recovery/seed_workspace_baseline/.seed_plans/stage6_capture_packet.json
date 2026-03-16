@@ -1,0 +1,28 @@
+[
+  {
+    "kind": "bridge_status"
+  },
+  {
+    "kind": "bridge_browser_render",
+    "url": "{input_url}"
+  },
+  {
+    "kind": "write_file",
+    "path": "research/current_capture.md",
+    "content_template": "# Browser Capture Packet\n\ntask={task}\ninput_url={input_url}\nfinal_url={last_browser_final_url}\ntitle={last_browser_title}\nrequest_id={last_browser_request_id}\ntrace_id={last_browser_trace_id}\ntext_bytes={last_browser_text_bytes}\ntext_truncated={last_browser_text_truncated}\n"
+  },
+  {
+    "kind": "write_file",
+    "path": "research/current_rendered_text.txt",
+    "content_template": "{last_browser_rendered_text}"
+  },
+  {
+    "kind": "write_binary_base64",
+    "path": "research/current_screenshot.png",
+    "base64_template": "{last_browser_screenshot_base64}"
+  },
+  {
+    "kind": "finish",
+    "summary": "stage6 single-url capture packet complete"
+  }
+]

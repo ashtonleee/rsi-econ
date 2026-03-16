@@ -44,6 +44,8 @@ def test_shared_policy_blocks_hosts_redirects_and_private_ips():
 
 def test_browser_policy_denies_popup_download_and_local_file():
     from trusted.browser.policy import (
+        browser_channel_violation,
+        classify_browser_channel,
         download_violation,
         popup_violation,
         select_followable_link,
@@ -67,6 +69,60 @@ def test_browser_policy_denies_popup_download_and_local_file():
 
     top_level_error = top_level_navigation_violation("http://allowed.test/other")
     assert top_level_error.reason == "top_level_navigation_not_allowed"
+
+    assert (
+        classify_browser_channel(
+            resource_type="document",
+            is_navigation_request=True,
+            is_main_frame=True,
+            headers={},
+            top_level_started=False,
+        )
+        == "top_level_navigation"
+    )
+    assert (
+        classify_browser_channel(
+            resource_type="document",
+            is_navigation_request=True,
+            is_main_frame=True,
+            headers={},
+            top_level_started=True,
+        )
+        == "redirect"
+    )
+    assert (
+        classify_browser_channel(
+            resource_type="document",
+            is_navigation_request=True,
+            is_main_frame=False,
+            headers={},
+            top_level_started=True,
+        )
+        == "frame_navigation"
+    )
+    assert (
+        classify_browser_channel(
+            resource_type="fetch",
+            is_navigation_request=False,
+            is_main_frame=False,
+            headers={},
+            top_level_started=True,
+        )
+        == "fetch_xhr"
+    )
+    assert (
+        classify_browser_channel(
+            resource_type="other",
+            is_navigation_request=False,
+            is_main_frame=False,
+            headers={"Purpose": "prefetch"},
+            top_level_started=True,
+        )
+        == "prefetch_preconnect"
+    )
+
+    channel_error = browser_channel_violation("websocket", "ws://blocked.test/socket")
+    assert channel_error.reason == "websocket_not_allowed"
 
     matched = select_followable_link(
         "http://allowed.test/browser/follow-target",

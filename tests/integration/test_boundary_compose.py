@@ -153,6 +153,7 @@ def test_compose_stack_starts_and_reports_litellm_health(compose_stack):
         env=compose_stack,
     )
     assert health["details"]["litellm_reachable"] is True
+    assert health["details"]["egress_reachable"] is True
 
     body = compose_http_json(
         "bridge",
@@ -161,6 +162,7 @@ def test_compose_stack_starts_and_reports_litellm_health(compose_stack):
         env=compose_stack,
     )
     assert body["connections"]["litellm"]["reachable"] is True
+    assert body["connections"]["egress"]["reachable"] is True
     assert body["log_path"].endswith("bridge_events.jsonl")
     assert body["operational_state_path"].endswith("operational_state.json")
     assert body["budget"]["total"] == BUDGET_CAP
@@ -191,6 +193,7 @@ def test_boundary_denies_direct_egress_and_allows_bridge_mediated_llm(compose_st
     expect_failure_via_agent("http://1.1.1.1", compose_stack)
     expect_failure_via_agent("https://api.openai.com/v1/models", compose_stack)
     expect_failure_via_agent("http://litellm:4000/healthz", compose_stack)
+    expect_failure_via_agent("http://egress:8084/healthz", compose_stack)
 
     public_probe = compose_http_json(
         "bridge",
@@ -262,6 +265,16 @@ def test_boundary_denies_direct_egress_and_allows_bridge_mediated_llm(compose_st
         item["request_id"] == chat["headers"]["x-request-id"]
         for item in state["recent_requests"]
     )
+
+
+def test_litellm_has_trusted_provider_egress_attachment(compose_stack):
+    container_id = compose_command(["ps", "-q", "litellm"], env=compose_stack).stdout.strip()
+    inspect = json.loads(run_command(["docker", "inspect", container_id]).stdout)[0]
+    networks = inspect["NetworkSettings"]["Networks"]
+
+    assert f"{COMPOSE_PROJECT}_trusted_net" in networks
+    assert f"{COMPOSE_PROJECT}_egress_net" in networks
+    assert networks[f"{COMPOSE_PROJECT}_egress_net"]["Gateway"]
 
 
 def test_budget_cap_denies_further_llm_calls_and_logs_denial(compose_stack):

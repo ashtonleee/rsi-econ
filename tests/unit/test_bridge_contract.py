@@ -2,8 +2,24 @@ import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
 from trusted.bridge.app import app
+from trusted.bridge.clients import TrustedBridgeClients
+from shared.schemas import (
+    BrowserFollowHrefInternalResponse,
+    BrowserRenderInternalResponse,
+    ChatChoice,
+    ChatCompletionResponse,
+    ChatMessage,
+    ChatUsage,
+    FetcherFetchResponse,
+)
+
+
+TINY_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2Wb6wAAAAASUVORK5CYII="
+)
 
 
 def load_events(log_path: Path) -> list[dict]:
@@ -106,6 +122,177 @@ def test_agent_run_events_ignore_spoofed_actor_header(monkeypatch, tmp_path):
     assert agent_events
     assert agent_events[-1]["actor"] == "agent"
     assert agent_events[-1]["summary"]["reported_origin"] == "untrusted_agent"
+
+
+def _patched_route_result(case: str):
+    if case == "llm_call":
+        async def fake_chat_completion(self, payload):
+            return ChatCompletionResponse(
+                id="chatcmpl-spoof-test",
+                object="chat.completion",
+                created=1,
+                model=payload.model,
+                choices=[
+                    ChatChoice(
+                        index=0,
+                        message=ChatMessage(role="assistant", content="spoof-resistant reply"),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=ChatUsage(prompt_tokens=2, completion_tokens=3, total_tokens=5),
+            )
+
+        return "chat_completion", fake_chat_completion
+
+    if case == "web_fetch":
+        async def fake_fetch_url(self, payload):
+            return FetcherFetchResponse(
+                normalized_url=payload.url,
+                final_url=payload.url,
+                scheme="http",
+                host="allowed.test",
+                port=80,
+                http_status=200,
+                content_type="text/plain",
+                byte_count=12,
+                truncated=False,
+                redirect_chain=[],
+                resolved_ips=["93.184.216.34"],
+                approved_ips=["93.184.216.34"],
+                actual_peer_ip="93.184.216.34",
+                used_ip="93.184.216.34",
+                content_sha256="fetch-sha256",
+                text="fixture body",
+                mediation_hops=[],
+            )
+
+        return "fetch_url", fake_fetch_url
+
+    if case == "browser_render":
+        async def fake_browser_render(self, payload):
+            return BrowserRenderInternalResponse(
+                normalized_url=payload.url,
+                final_url=payload.url,
+                http_status=200,
+                page_title="Fixture Browser Title",
+                meta_description="Fixture browser description",
+                rendered_text="Rendered browser text",
+                rendered_text_sha256="rendered-text-sha256",
+                text_bytes=21,
+                text_truncated=False,
+                screenshot_png_base64=TINY_PNG_BASE64,
+                screenshot_sha256="render-screenshot-sha256",
+                screenshot_bytes=67,
+                redirect_chain=[],
+                observed_hosts=["allowed.test"],
+                resolved_ips=["93.184.216.34"],
+                channel_records=[],
+                followable_links=[],
+            )
+
+        return "browser_render", fake_browser_render
+
+    if case == "browser_follow_href":
+        async def fake_browser_follow_href(self, payload):
+            return BrowserFollowHrefInternalResponse(
+                source_url=payload.source_url,
+                source_final_url=payload.source_url,
+                requested_target_url=payload.target_url,
+                matched_link_text="safe link",
+                follow_hop_count=1,
+                navigation_history=[payload.source_url, payload.target_url],
+                normalized_url=payload.target_url,
+                final_url=payload.target_url,
+                http_status=200,
+                page_title="Followed Target",
+                meta_description="Followed target description",
+                rendered_text="Followed browser text",
+                rendered_text_sha256="follow-text-sha256",
+                text_bytes=20,
+                text_truncated=False,
+                screenshot_png_base64=TINY_PNG_BASE64,
+                screenshot_sha256="follow-screenshot-sha256",
+                screenshot_bytes=67,
+                redirect_chain=[],
+                observed_hosts=["allowed.test"],
+                resolved_ips=["93.184.216.34"],
+                channel_records=[],
+            )
+
+        return "browser_follow_href", fake_browser_follow_href
+
+    raise ValueError(f"unsupported spoof test case: {case}")
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize(
+    ("case", "path", "payload", "event_type"),
+    [
+        (
+            "llm_call",
+            "/llm/chat/completions",
+            {
+                "model": "stage2-deterministic",
+                "messages": [{"role": "user", "content": "spoof this actor"}],
+            },
+            "llm_call",
+        ),
+        (
+            "web_fetch",
+            "/web/fetch",
+            {"url": "http://allowed.test/allowed"},
+            "web_fetch",
+        ),
+        (
+            "browser_render",
+            "/web/browser/render",
+            {"url": "http://allowed.test/browser/rendered"},
+            "browser_render",
+        ),
+        (
+            "browser_follow_href",
+            "/web/browser/follow-href",
+            {
+                "source_url": "http://allowed.test/browser/follow-source",
+                "target_url": "http://allowed.test/browser/follow-target",
+            },
+            "browser_follow_href",
+        ),
+    ],
+    ids=["llm", "fetch", "browser-render", "browser-follow"],
+)
+def test_agent_facing_routes_ignore_spoofed_actor_headers(
+    monkeypatch,
+    tmp_path,
+    case,
+    path,
+    payload,
+    event_type,
+):
+    monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    method_name, fake_method = _patched_route_result(case)
+    monkeypatch.setattr(TrustedBridgeClients, method_name, fake_method)
+
+    with TestClient(app) as client:
+        response = client.post(
+            path,
+            headers={"x-rsi-actor": "operator"},
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    request_id = response.headers["x-request-id"]
+    trace_id = response.headers["x-trace-id"]
+    events = load_events(tmp_path / "logs" / "bridge_events.jsonl")
+    matched = [
+        event
+        for event in events
+        if event["event_type"] == event_type
+        and event["request_id"] == request_id
+        and event["trace_id"] == trace_id
+    ]
+    assert matched
+    assert matched[-1]["actor"] == "agent"
 
 
 def test_debug_probe_routes_are_disabled_by_default(monkeypatch, tmp_path):

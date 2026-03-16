@@ -19,6 +19,26 @@ class TrustedBridgeClients:
         self.fetcher_url = fetcher_url.rstrip("/")
         self.browser_url = browser_url.rstrip("/")
         self.agent_url = agent_url.rstrip("/")
+        self.egress_url = ""
+
+    @classmethod
+    def with_egress(
+        cls,
+        *,
+        litellm_url: str,
+        fetcher_url: str,
+        browser_url: str,
+        egress_url: str,
+        agent_url: str,
+    ):
+        instance = cls(
+            litellm_url=litellm_url,
+            fetcher_url=fetcher_url,
+            browser_url=browser_url,
+            agent_url=agent_url,
+        )
+        instance.egress_url = egress_url.rstrip("/")
+        return instance
 
     async def litellm_health(self) -> tuple[bool, str | None]:
         try:
@@ -41,6 +61,17 @@ class TrustedBridgeClients:
     async def browser_health(self) -> tuple[bool, str | None]:
         try:
             async with httpx.AsyncClient(base_url=self.browser_url, timeout=3.0) as client:
+                response = await client.get("/healthz")
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        return True, None
+
+    async def egress_health(self) -> tuple[bool, str | None]:
+        if not self.egress_url:
+            return False, "egress_url_not_configured"
+        try:
+            async with httpx.AsyncClient(base_url=self.egress_url, timeout=3.0) as client:
                 response = await client.get("/healthz")
                 response.raise_for_status()
         except httpx.HTTPError as exc:

@@ -2,11 +2,12 @@ import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, HTTPException
 
 from shared.mock_llm import deterministic_reply, deterministic_usage
 from shared.schemas import ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ChatUsage, HealthReport
-from trusted.litellm.config import litellm_settings
+from trusted.litellm.config import SENTINEL_PROVIDER_KEY, litellm_settings
 
 
 def run_startup_checks(app: FastAPI):
@@ -14,8 +15,10 @@ def run_startup_checks(app: FastAPI):
 
     app.state.settings = settings
     app.state.startup_checks = {
-        "provider_key_configured": True,
-        "response_mode": "deterministic_stage3_mock",
+        "provider_key_configured": (
+            settings.provider_api_key not in {"", SENTINEL_PROVIDER_KEY}
+        ),
+        "response_mode": settings.response_mode,
     }
 
 
@@ -26,6 +29,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="trusted-litellm", lifespan=lifespan)
+
+
+async def provider_chat_completion(
+    settings,
+    payload: ChatCompletionRequest,
+) -> ChatCompletionResponse:
+    headers = {"Authorization": f"Bearer {settings.provider_api_key}"}
+    async with httpx.AsyncClient(
+        base_url=settings.provider_base_url,
+        timeout=30.0,
+        headers=headers,
+    ) as client:
+        response = await client.post("/chat/completions", json=payload.model_dump())
+        response.raise_for_status()
+    return ChatCompletionResponse.model_validate(response.json())
 
 
 @app.get("/healthz", response_model=HealthReport)
@@ -40,7 +58,17 @@ def healthz() -> HealthReport:
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-def chat_completions(payload: ChatCompletionRequest) -> ChatCompletionResponse:
+async def chat_completions(payload: ChatCompletionRequest) -> ChatCompletionResponse:
+    settings = app.state.settings
+    if settings.response_mode == "provider_passthrough":
+        try:
+            return await provider_chat_completion(settings, payload)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"provider passthrough failed: {type(exc).__name__}: {exc}",
+            ) from exc
+
     assistant_message = ChatMessage(
         role="assistant",
         content=deterministic_reply(payload.messages),

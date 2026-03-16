@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Trusted bridge, canonical state, and local-only Stage 3 seed-agent substrate for RSI."
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.10,<4.0",
     "fastapi>=0.115,<1.0",
     "httpx>=0.27,<1.0",
     "pydantic>=2.7,<3.0",
@@ -29,6 +30,9 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = [
+    "fast: low-runtime invariant checks intended to run on every change",
+]
 
 [tool.setuptools.packages.find]
 include = ["shared*", "trusted*", "untrusted*"]

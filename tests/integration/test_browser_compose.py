@@ -17,12 +17,20 @@ REPORT_PATH = WORKSPACE_ROOT / "reports" / "stage6_browser_report.md"
 SCREENSHOT_PATH = WORKSPACE_ROOT / "reports" / "stage6_browser_screenshot.png"
 FOLLOW_REPORT_PATH = WORKSPACE_ROOT / "reports" / "stage6b_browser_follow_report.md"
 FOLLOW_SCREENSHOT_PATH = WORKSPACE_ROOT / "reports" / "stage6b_browser_follow_screenshot.png"
+ANSWER_REPORT_PATH = WORKSPACE_ROOT / "research" / "current_answer.md"
+CAPTURE_REPORT_PATH = WORKSPACE_ROOT / "research" / "current_capture.md"
+CAPTURE_TEXT_PATH = WORKSPACE_ROOT / "research" / "current_rendered_text.txt"
+CAPTURE_SCREENSHOT_PATH = WORKSPACE_ROOT / "research" / "current_screenshot.png"
+FOLLOW_ANSWER_REPORT_PATH = WORKSPACE_ROOT / "research" / "current_follow_answer.md"
+FOLLOW_CAPTURE_REPORT_PATH = WORKSPACE_ROOT / "research" / "current_follow_capture.md"
+FOLLOW_TEXT_PATH = WORKSPACE_ROOT / "research" / "current_follow_rendered_text.txt"
+FOLLOW_CAPTURE_SCREENSHOT_PATH = WORKSPACE_ROOT / "research" / "current_follow_screenshot.png"
 
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
     env["COMPOSE_PROJECT_NAME"] = COMPOSE_PROJECT
-    env["RSI_LLM_BUDGET_TOKEN_CAP"] = "120"
+    env["RSI_LLM_BUDGET_TOKEN_CAP"] = "200"
     env["RSI_WEB_ALLOWLIST_HOSTS"] = "allowed.test,allowed-two.test"
     env["RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"] = "allowed.test,allowed-two.test"
     return env
@@ -104,6 +112,16 @@ def load_state() -> dict:
     return json.loads(STATE_PATH.read_text(encoding="ascii"))
 
 
+def parse_report_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line or line.startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        fields[key] = value
+    return fields
+
+
 def expect_failure_via_agent(target_url: str, env: dict[str, str]):
     code = (
         "import sys, urllib.request\n"
@@ -177,6 +195,7 @@ def test_browser_render_succeeds_only_through_trusted_path(compose_stack):
     expect_failure_via_agent("http://litellm:4000/healthz", compose_stack)
     expect_failure_via_agent("http://fetcher:8082/healthz", compose_stack)
     expect_failure_via_agent("http://browser:8083/healthz", compose_stack)
+    expect_failure_via_agent("http://egress:8084/healthz", compose_stack)
 
     rendered = compose_http_response(
         "agent",
@@ -459,6 +478,315 @@ def test_seed_runner_browser_demo_writes_artifacts_and_recovery_resets_them(comp
 
     state = load_state()
     assert state["browser"]["counters"]["browser_render_success"] >= 1
+
+
+def test_seed_runner_single_url_capture_packet_writes_artifacts_and_recovery_resets_them(compose_stack):
+    input_url = "http://allowed.test/browser/rendered"
+    direct = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/render",
+        env=compose_stack,
+        payload={"url": input_url},
+    )
+    assert direct["status_code"] == 200
+    direct_body = direct["json"]
+
+    result = compose_exec(
+        "agent",
+        [
+            "python",
+            "-m",
+            "untrusted.agent.seed_runner",
+            "--task",
+            "capture one allowlisted page into a research packet",
+            "--planner",
+            "scripted",
+            "--script",
+            ".seed_plans/stage6_capture_packet.json",
+            "--input-url",
+            input_url,
+            "--max-steps",
+            "8",
+        ],
+        env=compose_stack,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["input_url"] == input_url
+    assert CAPTURE_REPORT_PATH.exists()
+    assert CAPTURE_TEXT_PATH.exists()
+    assert CAPTURE_SCREENSHOT_PATH.exists()
+
+    report = CAPTURE_REPORT_PATH.read_text(encoding="utf-8")
+    fields = parse_report_fields(report)
+    captured_text = CAPTURE_TEXT_PATH.read_text(encoding="utf-8")
+
+    assert fields["input_url"] == input_url
+    assert fields["final_url"] == input_url
+    assert fields["title"] == "Stage 6 Fixture Title"
+    assert fields["request_id"]
+    assert fields["trace_id"]
+    assert fields["text_bytes"] == str(direct_body["text_bytes"])
+    assert fields["text_truncated"] == str(direct_body["text_truncated"])
+    assert captured_text == direct_body["rendered_text"]
+    assert CAPTURE_SCREENSHOT_PATH.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    summary = json.loads(
+        (WORKSPACE_ROOT / "run_outputs" / "latest_seed_run.json").read_text(encoding="ascii")
+    )
+    assert summary["input_url"] == input_url
+    assert any(step["kind"] == "bridge_browser_render" for step in summary["steps"])
+
+    events = load_events()
+    matched = [
+        event
+        for event in events
+        if event["event_type"] == "browser_render"
+        and event["request_id"] == fields["request_id"]
+        and event["trace_id"] == fields["trace_id"]
+    ]
+    assert matched
+
+    reset = run_command(
+        ["./scripts/recovery.sh", "reset-workspace-to-seed-baseline"],
+        env=compose_stack,
+    )
+    assert reset.returncode == 0
+    assert not CAPTURE_REPORT_PATH.exists()
+    assert not CAPTURE_TEXT_PATH.exists()
+    assert not CAPTURE_SCREENSHOT_PATH.exists()
+
+
+def test_seed_runner_single_source_answer_packet_writes_artifacts_logs_llm_and_resets(compose_stack):
+    input_url = "http://allowed.test/browser/rendered"
+    question = "What does this page say?"
+    direct = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/render",
+        env=compose_stack,
+        payload={"url": input_url},
+    )
+    assert direct["status_code"] == 200
+    direct_body = direct["json"]
+
+    result = compose_exec(
+        "agent",
+        [
+            "python",
+            "-m",
+            "untrusted.agent.seed_runner",
+            "--task",
+            question,
+            "--planner",
+            "scripted",
+            "--script",
+            ".seed_plans/stage6_answer_packet.json",
+            "--input-url",
+            input_url,
+            "--max-steps",
+            "8",
+        ],
+        env=compose_stack,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert ANSWER_REPORT_PATH.exists()
+    assert CAPTURE_REPORT_PATH.exists()
+    assert CAPTURE_TEXT_PATH.exists()
+    assert CAPTURE_SCREENSHOT_PATH.exists()
+
+    answer = ANSWER_REPORT_PATH.read_text(encoding="utf-8")
+    capture = CAPTURE_REPORT_PATH.read_text(encoding="utf-8")
+    captured_text = CAPTURE_TEXT_PATH.read_text(encoding="utf-8")
+    answer_fields = parse_report_fields(answer)
+    capture_fields = parse_report_fields(capture)
+
+    assert answer_fields["question"] == question
+    assert answer_fields["input_url"] == input_url
+    assert answer_fields["final_url"] == input_url
+    assert answer_fields["title"] == "Stage 6 Fixture Title"
+    assert answer_fields["request_id"]
+    assert answer_fields["trace_id"]
+    assert answer_fields["text_bytes"] == str(direct_body["text_bytes"])
+    assert answer_fields["text_truncated"] == str(direct_body["text_truncated"])
+    assert answer_fields["llm_model"] == "stage1-deterministic"
+    assert "stage1 deterministic reply:" in answer
+    assert question in answer
+    assert capture_fields["request_id"] == answer_fields["request_id"]
+    assert capture_fields["trace_id"] == answer_fields["trace_id"]
+    assert captured_text == direct_body["rendered_text"]
+    assert CAPTURE_SCREENSHOT_PATH.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    summary = json.loads(
+        (WORKSPACE_ROOT / "run_outputs" / "latest_seed_run.json").read_text(encoding="ascii")
+    )
+    assert summary["input_url"] == input_url
+    assert any(step["kind"] == "bridge_browser_render" for step in summary["steps"])
+    assert any(step["kind"] == "bridge_chat" for step in summary["steps"])
+
+    events = load_events()
+    assert any(
+        event["event_type"] == "browser_render"
+        and event["request_id"] == answer_fields["request_id"]
+        and event["trace_id"] == answer_fields["trace_id"]
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "llm_call"
+        and event["actor"] == "agent"
+        and event["outcome"] == "success"
+        and event["summary"]["model"] == "stage1-deterministic"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "budget_update"
+        and event["outcome"] == "success"
+        and event["summary"]["action"] == "mediated_llm_usage_accounted"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "agent_run"
+        and event["summary"]["event_kind"] == "run_end"
+        and event["summary"]["reported_origin"] == "untrusted_agent"
+        for event in events
+    )
+
+    reset = run_command(
+        ["./scripts/recovery.sh", "reset-workspace-to-seed-baseline"],
+        env=compose_stack,
+    )
+    assert reset.returncode == 0
+    assert not ANSWER_REPORT_PATH.exists()
+    assert not CAPTURE_REPORT_PATH.exists()
+    assert not CAPTURE_TEXT_PATH.exists()
+    assert not CAPTURE_SCREENSHOT_PATH.exists()
+
+
+def test_seed_runner_follow_answer_packet_writes_artifacts_logs_llm_and_resets(compose_stack):
+    source_url = "http://allowed.test/browser/follow-source"
+    follow_target_url = "http://allowed.test/browser/follow-target"
+    question = "What does the followed page say?"
+    direct = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/follow-href",
+        env=compose_stack,
+        payload={"source_url": source_url, "target_url": follow_target_url},
+    )
+    assert direct["status_code"] == 200
+    direct_body = direct["json"]
+
+    result = compose_exec(
+        "agent",
+        [
+            "python",
+            "-m",
+            "untrusted.agent.seed_runner",
+            "--task",
+            question,
+            "--planner",
+            "scripted",
+            "--script",
+            ".seed_plans/stage6_follow_answer_packet.json",
+            "--input-url",
+            source_url,
+            "--follow-target-url",
+            follow_target_url,
+            "--max-steps",
+            "10",
+        ],
+        env=compose_stack,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["input_url"] == source_url
+    assert payload["follow_target_url"] == follow_target_url
+    assert FOLLOW_ANSWER_REPORT_PATH.exists()
+    assert FOLLOW_CAPTURE_REPORT_PATH.exists()
+    assert FOLLOW_TEXT_PATH.exists()
+    assert FOLLOW_CAPTURE_SCREENSHOT_PATH.exists()
+
+    answer = FOLLOW_ANSWER_REPORT_PATH.read_text(encoding="utf-8")
+    capture = FOLLOW_CAPTURE_REPORT_PATH.read_text(encoding="utf-8")
+    captured_text = FOLLOW_TEXT_PATH.read_text(encoding="utf-8")
+    answer_fields = parse_report_fields(answer)
+    capture_fields = parse_report_fields(capture)
+
+    assert answer_fields["question"] == question
+    assert answer_fields["source_input_url"] == source_url
+    assert answer_fields["source_final_url"] == source_url
+    assert answer_fields["requested_target_url"] == follow_target_url
+    assert answer_fields["matched_link_text"] == "Follow same origin target"
+    assert answer_fields["followed_final_url"] == follow_target_url
+    assert answer_fields["title"] == direct_body["page_title"]
+    assert answer_fields["request_id"]
+    assert answer_fields["trace_id"]
+    assert answer_fields["text_bytes"] == str(direct_body["text_bytes"])
+    assert answer_fields["text_truncated"] == str(direct_body["text_truncated"])
+    assert answer_fields["llm_model"] == "stage1-deterministic"
+    assert "stage1 deterministic reply:" in answer
+    assert question in answer
+    assert capture_fields["request_id"] == answer_fields["request_id"]
+    assert capture_fields["trace_id"] == answer_fields["trace_id"]
+    assert capture_fields["matched_link_text"] == "Follow same origin target"
+    assert captured_text == direct_body["rendered_text"]
+    assert FOLLOW_CAPTURE_SCREENSHOT_PATH.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    summary = json.loads(
+        (WORKSPACE_ROOT / "run_outputs" / "latest_seed_run.json").read_text(encoding="ascii")
+    )
+    assert summary["input_url"] == source_url
+    assert summary["follow_target_url"] == follow_target_url
+    assert any(step["kind"] == "bridge_browser_render" for step in summary["steps"])
+    assert any(step["kind"] == "bridge_browser_follow_href" for step in summary["steps"])
+    assert any(step["kind"] == "bridge_chat" for step in summary["steps"])
+
+    events = load_events()
+    matched_browser = [
+        event
+        for event in events
+        if event["event_type"] == "browser_follow_href"
+        and event["request_id"] == answer_fields["request_id"]
+        and event["trace_id"] == answer_fields["trace_id"]
+    ]
+    assert matched_browser
+    browser_event = matched_browser[0]
+    assert browser_event["summary"]["requested_target_url"] == follow_target_url
+    assert browser_event["summary"]["matched_link_text"] == "Follow same origin target"
+    assert browser_event["summary"]["screenshot_sha256"]
+    assert direct_body["rendered_text"] not in json.dumps(browser_event)
+    assert direct_body["screenshot_png_base64"] not in json.dumps(browser_event)
+    assert any(
+        event["event_type"] == "llm_call"
+        and event["actor"] == "agent"
+        and event["outcome"] == "success"
+        and event["summary"]["model"] == "stage1-deterministic"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "budget_update"
+        and event["outcome"] == "success"
+        and event["summary"]["action"] == "mediated_llm_usage_accounted"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "agent_run"
+        and event["summary"]["event_kind"] == "run_end"
+        and event["summary"]["reported_origin"] == "untrusted_agent"
+        for event in events
+    )
+
+    reset = run_command(
+        ["./scripts/recovery.sh", "reset-workspace-to-seed-baseline"],
+        env=compose_stack,
+    )
+    assert reset.returncode == 0
+    assert not FOLLOW_ANSWER_REPORT_PATH.exists()
+    assert not FOLLOW_CAPTURE_REPORT_PATH.exists()
+    assert not FOLLOW_TEXT_PATH.exists()
+    assert not FOLLOW_CAPTURE_SCREENSHOT_PATH.exists()
 
 
 def test_seed_runner_browser_follow_demo_writes_artifacts_and_recovery_resets_them(compose_stack):

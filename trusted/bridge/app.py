@@ -115,10 +115,20 @@ def request_identity() -> tuple[str, str]:
     return uuid4().hex, uuid4().hex
 
 
+def error_detail_payload(exc: httpx.HTTPStatusError) -> dict:
+    payload = exc.response.json()
+    if isinstance(payload, dict) and isinstance(payload.get("detail"), dict):
+        return payload["detail"]
+    if isinstance(payload, dict):
+        return payload
+    return {"detail": payload}
+
+
 async def trusted_connections_payload() -> dict[str, dict]:
     reachable, detail = await app.state.clients.litellm_health()
     fetcher_reachable, fetcher_detail = await app.state.clients.fetcher_health()
     browser_reachable, browser_detail = await app.state.clients.browser_health()
+    egress_reachable, egress_detail = await app.state.clients.egress_health()
     checked_at = utc_now_iso()
     return {
         "bridge": {
@@ -143,6 +153,12 @@ async def trusted_connections_payload() -> dict[str, dict]:
             "url": app.state.settings.browser_url,
             "reachable": browser_reachable,
             "detail": browser_detail,
+            "checked_at": checked_at,
+        },
+        "egress": {
+            "url": app.state.settings.egress_url,
+            "reachable": egress_reachable,
+            "detail": egress_detail,
             "checked_at": checked_at,
         },
     }
@@ -243,10 +259,11 @@ def run_startup_checks(app: FastAPI):
         web_defaults=web_defaults_for(settings),
         browser_defaults=browser_defaults_for(settings),
     )
-    app.state.clients = TrustedBridgeClients(
+    app.state.clients = TrustedBridgeClients.with_egress(
         litellm_url=settings.litellm_url,
         fetcher_url=settings.fetcher_url,
         browser_url=settings.browser_url,
+        egress_url=settings.egress_url,
         agent_url=settings.agent_url,
     )
     app.state.startup_checks = {
@@ -257,6 +274,7 @@ def run_startup_checks(app: FastAPI):
         "checkpoint_dir": str(settings.checkpoint_dir),
         "fetcher_url": settings.fetcher_url,
         "browser_url": settings.browser_url,
+        "egress_url": settings.egress_url,
     }
 
 
@@ -323,6 +341,8 @@ async def healthz() -> HealthReport:
             "fetcher_detail": connections["fetcher"]["detail"],
             "browser_reachable": connections["browser"]["reachable"],
             "browser_detail": connections["browser"]["detail"],
+            "egress_reachable": connections["egress"]["reachable"],
+            "egress_detail": connections["egress"]["detail"],
         },
     )
 
@@ -536,13 +556,22 @@ def web_event_summary(
         "port": fetch_result.port,
         "allowlist_decision": "allowed" if outcome == "success" else "denied",
         "resolved_ips": list(fetch_result.resolved_ips),
+        "approved_ips": list(fetch_result.approved_ips),
+        "actual_peer_ip": fetch_result.actual_peer_ip,
         "used_ip": fetch_result.used_ip,
+        "enforcement_stage": fetch_result.mediation_hops[-1].enforcement_stage
+        if fetch_result.mediation_hops
+        else "unknown",
+        "request_forwarded": fetch_result.mediation_hops[-1].request_forwarded
+        if fetch_result.mediation_hops
+        else False,
         "redirect_chain": list(fetch_result.redirect_chain),
         "http_status": fetch_result.http_status,
         "content_type": fetch_result.content_type,
         "byte_count": fetch_result.byte_count,
         "truncated": fetch_result.truncated,
         "content_sha256": fetch_result.content_sha256,
+        "mediation_hops": [hop.model_dump() for hop in fetch_result.mediation_hops],
     }
     if reason:
         summary["reason"] = reason
@@ -557,13 +586,18 @@ def web_error_summary(detail: dict) -> dict:
         "port": detail.get("port", 0),
         "allowlist_decision": "denied",
         "resolved_ips": list(detail.get("resolved_ips", [])),
+        "approved_ips": list(detail.get("approved_ips", [])),
+        "actual_peer_ip": detail.get("actual_peer_ip"),
         "used_ip": detail.get("used_ip"),
+        "enforcement_stage": detail.get("enforcement_stage", "unknown"),
+        "request_forwarded": bool(detail.get("request_forwarded", False)),
         "redirect_chain": list(detail.get("redirect_chain", [])),
         "http_status": detail.get("http_status"),
         "content_type": detail.get("content_type"),
         "byte_count": int(detail.get("byte_count", 0)),
         "truncated": bool(detail.get("truncated", False)),
         "content_sha256": detail.get("content_sha256", ""),
+        "mediation_hops": list(detail.get("mediation_hops", [])),
         "reason": detail.get("reason", detail.get("detail", "fetch_failed")),
     }
 
@@ -586,7 +620,9 @@ def browser_event_summary(render_result, *, outcome: str, reason: str | None = N
         "text_truncated": render_result.text_truncated,
         "screenshot_sha256": render_result.screenshot_sha256,
         "screenshot_bytes": render_result.screenshot_bytes,
+        "channel_records": [record.model_dump() for record in render_result.channel_records],
         "followable_links_count": len(getattr(render_result, "followable_links", [])),
+        "request_forwarded": any(record.request_forwarded for record in render_result.channel_records),
     }
     if reason:
         summary["reason"] = reason
@@ -611,6 +647,12 @@ def browser_error_summary(detail: dict) -> dict:
         "text_truncated": bool(detail.get("text_truncated", False)),
         "screenshot_sha256": detail.get("screenshot_sha256", ""),
         "screenshot_bytes": int(detail.get("screenshot_bytes", 0)),
+        "channel_records": list(detail.get("channel_records", [])),
+        "request_forwarded": any(
+            bool(record.get("request_forwarded", False))
+            for record in detail.get("channel_records", [])
+            if isinstance(record, dict)
+        ),
         "reason": detail.get("reason", detail.get("detail", "browser_render_failed")),
     }
 
@@ -639,6 +681,8 @@ def browser_follow_event_summary(follow_result, *, outcome: str, reason: str | N
         "text_truncated": follow_result.text_truncated,
         "screenshot_sha256": follow_result.screenshot_sha256,
         "screenshot_bytes": follow_result.screenshot_bytes,
+        "channel_records": [record.model_dump() for record in follow_result.channel_records],
+        "request_forwarded": any(record.request_forwarded for record in follow_result.channel_records),
     }
     if reason:
         summary["reason"] = reason
@@ -669,6 +713,12 @@ def browser_follow_error_summary(detail: dict) -> dict:
         "text_truncated": bool(detail.get("text_truncated", False)),
         "screenshot_sha256": detail.get("screenshot_sha256", ""),
         "screenshot_bytes": int(detail.get("screenshot_bytes", 0)),
+        "channel_records": list(detail.get("channel_records", [])),
+        "request_forwarded": any(
+            bool(record.get("request_forwarded", False))
+            for record in detail.get("channel_records", [])
+            if isinstance(record, dict)
+        ),
         "reason": detail.get("reason", detail.get("detail", "browser_follow_href_failed")),
     }
 
@@ -685,7 +735,7 @@ async def bridge_fetch(
     try:
         fetch_result = await app.state.clients.fetch_url(payload)
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.json()
+        detail = error_detail_payload(exc)
         status_code = exc.response.status_code
         event_type = "web_fetch_denied" if status_code in {400, 403, 415} else "web_fetch_error"
         append_event(
@@ -719,6 +769,8 @@ async def bridge_fetch(
                 "port": 0,
                 "allowlist_decision": "unknown",
                 "resolved_ips": [],
+                "approved_ips": [],
+                "actual_peer_ip": None,
                 "used_ip": None,
                 "redirect_chain": [],
                 "http_status": None,
@@ -726,6 +778,7 @@ async def bridge_fetch(
                 "byte_count": 0,
                 "truncated": False,
                 "content_sha256": "",
+                "mediation_hops": [],
                 "reason": f"{type(exc).__name__}: {exc}",
             },
         )
@@ -767,7 +820,7 @@ async def bridge_browser_render(
     try:
         render_result = await app.state.clients.browser_render(payload)
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.json()
+        detail = error_detail_payload(exc)
         status_code = exc.response.status_code
         event_type = "browser_render_denied" if status_code in {400, 403, 413} else "browser_render_error"
         append_event(
@@ -810,6 +863,7 @@ async def bridge_browser_render(
                 "text_truncated": False,
                 "screenshot_sha256": "",
                 "screenshot_bytes": 0,
+                "channel_records": [],
                 "reason": f"{type(exc).__name__}: {exc}",
             },
         )
@@ -851,7 +905,7 @@ async def bridge_browser_follow_href(
     try:
         follow_result = await app.state.clients.browser_follow_href(payload)
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.json()
+        detail = error_detail_payload(exc)
         status_code = exc.response.status_code
         event_type = (
             "browser_follow_href_denied"
@@ -904,6 +958,7 @@ async def bridge_browser_follow_href(
                 "text_truncated": False,
                 "screenshot_sha256": "",
                 "screenshot_bytes": 0,
+                "channel_records": [],
                 "reason": f"{type(exc).__name__}: {exc}",
             },
         )
