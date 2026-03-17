@@ -10,6 +10,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_WORKSPACE_ROOT = ROOT / "untrusted" / "agent_workspace"
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env(*, state_root: Path, workspace_root: Path) -> dict[str, str]:
     env = os.environ.copy()
@@ -65,14 +76,16 @@ def compose_http_response(
     *,
     env: dict[str, str],
     payload: dict | None = None,
+    headers: dict | None = None,
 ) -> dict:
     code = (
         "import httpx, json\n"
         f"method = {method!r}\n"
         f"url = {url!r}\n"
         f"payload = {json.dumps(payload)!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
         "with httpx.Client(timeout=20.0) as client:\n"
-        "    response = client.request(method, url, json=json.loads(payload) if payload else None)\n"
+        "    response = client.request(method, url, json=json.loads(payload) if payload else None, headers=json.loads(headers))\n"
         "body = None\n"
         "try:\n"
         "    body = response.json()\n"
@@ -152,6 +165,7 @@ def test_allowed_control_paths_still_succeed_under_h3(compose_stack):
         "http://bridge:8000/web/fetch",
         env=compose_stack["env"],
         payload={"url": "http://allowed.test/allowed"},
+        headers=agent_auth_headers(),
     )
     assert fetch_response["status_code"] == 200
 
@@ -161,6 +175,7 @@ def test_allowed_control_paths_still_succeed_under_h3(compose_stack):
         "http://bridge:8000/web/browser/render",
         env=compose_stack["env"],
         payload={"url": "http://allowed.test/browser/rendered"},
+        headers=agent_auth_headers(),
     )
     assert render_response["status_code"] == 200
 
@@ -173,6 +188,7 @@ def test_allowed_control_paths_still_succeed_under_h3(compose_stack):
             "source_url": "http://allowed.test/browser/follow-source",
             "target_url": "http://allowed.test/browser/follow-target",
         },
+        headers=agent_auth_headers(),
     )
     assert follow_response["status_code"] == 200
 
@@ -209,6 +225,7 @@ def test_fetcher_prevents_mismatch_before_upstream_request(compose_stack):
         "http://bridge:8000/web/fetch",
         env=compose_stack["env"],
         payload={"url": "http://allowed-two.test/allowed"},
+        headers=agent_auth_headers(),
     )
     assert response["status_code"] == 502
 
@@ -235,6 +252,7 @@ def test_browser_prevents_mismatch_before_navigation_reaches_fixture(compose_sta
         "http://bridge:8000/web/browser/render",
         env=compose_stack["env"],
         payload={"url": "http://allowed-two.test/browser/rendered"},
+        headers=agent_auth_headers(),
     )
     assert response["status_code"] == 403
 
@@ -267,6 +285,7 @@ def test_redirect_hop_revalidation_blocks_before_forwarding_next_hop(compose_sta
         "http://bridge:8000/web/fetch",
         env=compose_stack["env"],
         payload={"url": "http://allowed.test/redirect-allowed-two"},
+        headers=agent_auth_headers(),
     )
     assert response["status_code"] == 502
 

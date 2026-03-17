@@ -15,6 +15,17 @@ WORKSPACE_ROOT = ROOT / "untrusted" / "agent_workspace"
 RUN_OUTPUTS = WORKSPACE_ROOT / "run_outputs"
 BUDGET_CAP = 120
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -166,7 +177,7 @@ def test_seed_runner_uses_workspace_mount_and_bridge_surfaces(compose_stack):
         for event in events
     )
     assert any(
-        event["event_type"] == "status_query" and event["actor"] == "unauthenticated_bridge_client"
+        event["event_type"] == "status_query" and event["actor"] == "agent"
         for event in events
     )
     assert any(

@@ -139,7 +139,26 @@ def _error_detail(
     }
 
 
+CHANNELS_ALLOWING_POST = {"consequential_action"}
+ALLOWED_METHODS = {"GET", "POST"}
+
+
 async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
+    method = payload.method.upper()
+    if method not in ALLOWED_METHODS:
+        raise HTTPException(
+            status_code=405,
+            detail={"reason": "method_not_allowed", "detail": f"unsupported method: {method}"},
+        )
+    if method != "GET" and payload.channel not in CHANNELS_ALLOWING_POST:
+        raise HTTPException(
+            status_code=405,
+            detail={
+                "reason": "method_not_allowed",
+                "detail": f"{method} not allowed on channel {payload.channel}",
+            },
+        )
+
     policy = app.state.policy
     settings = app.state.settings
     approved: ApprovedEgressTarget | None = None
@@ -172,6 +191,16 @@ async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
     headers.setdefault("User-Agent", settings.user_agent)
     headers.setdefault("Accept-Encoding", "identity")
 
+    # Prepare request body for POST
+    request_body: bytes | None = None
+    if method == "POST":
+        if payload.request_body_base64:
+            request_body = base64.b64decode(payload.request_body_base64)
+        else:
+            request_body = b""
+        if payload.request_content_type:
+            headers["Content-Type"] = payload.request_content_type
+
     try:
         connect_errors: list[str] = []
         for dialed_ip in approved.approved_ips:
@@ -193,11 +222,17 @@ async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
                     auto_decompress=False,
                     trust_env=False,
                 ) as session:
-                    async with session.get(
+                    request_kwargs: dict = {
+                        "headers": headers,
+                        "allow_redirects": False,
+                        "timeout": aiohttp.ClientTimeout(total=policy.timeout_seconds),
+                    }
+                    if method == "POST" and request_body is not None:
+                        request_kwargs["data"] = request_body
+                    async with session.request(
+                        method,
                         approved.target.normalized_url,
-                        headers=headers,
-                        allow_redirects=False,
-                        timeout=aiohttp.ClientTimeout(total=policy.timeout_seconds),
+                        **request_kwargs,
                     ) as response:
                         actual_peer_ip = _peer_ip(response) or dialed_ip
                         if actual_peer_ip != dialed_ip:

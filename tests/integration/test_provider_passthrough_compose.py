@@ -20,6 +20,17 @@ FOLLOW_CAPTURE_REPORT_PATH = WORKSPACE_ROOT / "research" / "current_follow_captu
 FOLLOW_TEXT_PATH = WORKSPACE_ROOT / "research" / "current_follow_rendered_text.txt"
 FOLLOW_CAPTURE_SCREENSHOT_PATH = WORKSPACE_ROOT / "research" / "current_follow_screenshot.png"
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -75,14 +86,16 @@ def compose_http_response(
     *,
     env: dict[str, str],
     payload: dict | None = None,
+    headers: dict | None = None,
 ) -> dict:
     code = (
         "import httpx, json\n"
         f"method = {method!r}\n"
         f"url = {url!r}\n"
         f"payload = {json.dumps(payload)!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
         "with httpx.Client(timeout=20.0) as client:\n"
-        "    response = client.request(method, url, json=json.loads(payload) if payload else None)\n"
+        "    response = client.request(method, url, json=json.loads(payload) if payload else None, headers=json.loads(headers))\n"
         "body = None\n"
         "try:\n"
         "    body = response.json()\n"

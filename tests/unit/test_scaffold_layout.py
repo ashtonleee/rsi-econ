@@ -98,8 +98,15 @@ def test_agent_service_has_no_obvious_secret_env_entries():
     else:
         keys = list(environment.keys())
 
+    # RSI_AGENT_TOKEN is intentionally in the agent container (non-secret role identifier).
+    # RSI_OPERATOR_TOKEN must NEVER appear here.
+    allowed = {"RSI_AGENT_TOKEN"}
     banned_fragments = ("KEY", "SECRET", "TOKEN")
-    assert all(fragment not in key.upper() for key in keys for fragment in banned_fragments)
+    filtered_keys = [k for k in keys if k not in allowed]
+    assert all(
+        fragment not in key.upper() for key in filtered_keys for fragment in banned_fragments
+    )
+    assert "RSI_OPERATOR_TOKEN" not in keys, "operator token must never be in agent container"
 
 
 def test_litellm_is_not_reachable_by_agent_topology():

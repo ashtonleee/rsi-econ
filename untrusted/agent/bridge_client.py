@@ -1,10 +1,11 @@
 import argparse
 import asyncio
 import json
+import os
 
 import httpx
 
-from shared.config import DEFAULT_BRIDGE_URL
+from shared.config import DEFAULT_AGENT_TOKEN, DEFAULT_BRIDGE_URL
 from shared.schemas import (
     AgentRunEventReceipt,
     AgentRunEventRequest,
@@ -23,9 +24,11 @@ from shared.schemas import (
 
 
 class BridgeClient:
-    def __init__(self, bridge_url: str):
+    def __init__(self, bridge_url: str, *, agent_token: str = ""):
         self.bridge_url = bridge_url.rstrip("/")
         self.headers: dict[str, str] = {}
+        if agent_token:
+            self.headers["Authorization"] = f"Bearer {agent_token}"
 
     async def health(self) -> HealthReport:
         async with httpx.AsyncClient(base_url=self.bridge_url, timeout=5.0) as client:
@@ -117,8 +120,8 @@ class BridgeClient:
         return AgentRunEventReceipt.model_validate(response.json())
 
 
-async def probe_bridge(bridge_url: str) -> dict:
-    bridge = await BridgeClient(bridge_url).health()
+async def probe_bridge(bridge_url: str, *, agent_token: str = "") -> dict:
+    bridge = await BridgeClient(bridge_url, agent_token=agent_token).health()
     return {
         "bridge_url": bridge_url,
         "reachable": True,
@@ -149,28 +152,30 @@ def main():
     browser_follow_parser.add_argument("--target-url", required=True)
 
     args = parser.parse_args()
+    token = os.environ.get("RSI_AGENT_TOKEN", DEFAULT_AGENT_TOKEN)
+    client = BridgeClient(args.bridge_url, agent_token=token)
     if args.command in (None, "health"):
-        result = asyncio.run(probe_bridge(args.bridge_url))
+        result = asyncio.run(probe_bridge(args.bridge_url, agent_token=token))
     elif args.command == "status":
-        result = asyncio.run(BridgeClient(args.bridge_url).status()).model_dump()
+        result = asyncio.run(client.status()).model_dump()
     elif args.command == "chat":
         result = asyncio.run(
-            BridgeClient(args.bridge_url).chat(
+            client.chat(
                 model=args.model,
                 message=args.message,
             )
         ).model_dump()
     elif args.command == "fetch":
         result = asyncio.run(
-            BridgeClient(args.bridge_url).fetch(url=args.url)
+            client.fetch(url=args.url)
         ).model_dump()
     elif args.command == "browser-render":
         result = asyncio.run(
-            BridgeClient(args.bridge_url).browser_render(url=args.url)
+            client.browser_render(url=args.url)
         ).model_dump()
     elif args.command == "browser-follow-href":
         result = asyncio.run(
-            BridgeClient(args.bridge_url).browser_follow_href(
+            client.browser_follow_href(
                 source_url=args.source_url,
                 target_url=args.target_url,
             )

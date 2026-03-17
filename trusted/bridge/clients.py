@@ -7,6 +7,8 @@ from shared.schemas import (
     BrowserRenderRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    EgressFetchRequest,
+    EgressFetchResponse,
     EgressProbeResult,
     FetcherFetchResponse,
     WebFetchRequest,
@@ -110,6 +112,13 @@ class TrustedBridgeClients:
             response = await client.post("/internal/follow-href", json=payload.model_dump())
             response.raise_for_status()
         return BrowserFollowHrefInternalResponse.model_validate(response.json())
+
+    async def egress_fetch(self, payload: EgressFetchRequest) -> EgressFetchResponse:
+        """Call egress /internal/fetch directly (used for consequential actions)."""
+        async with httpx.AsyncClient(base_url=self.egress_url, timeout=15.0) as client:
+            response = await client.post("/internal/fetch", json=payload.model_dump())
+            response.raise_for_status()
+        return EgressFetchResponse.model_validate(response.json())
 
     async def run_agent_probe(self, probe_kind: str) -> EgressProbeResult:
         if probe_kind == "public":

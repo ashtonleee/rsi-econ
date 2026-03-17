@@ -556,7 +556,7 @@ async def run_once(args) -> SeedRunResult:
     runner = SeedRunner(
         workspace_dir=settings.workspace_dir,
         runtime_code_dir=settings.runtime_code_dir,
-        bridge_client=BridgeClient(args.bridge_url),
+        bridge_client=BridgeClient(args.bridge_url, agent_token=settings.agent_token),
         planner=planner,
         max_steps=args.max_steps,
     )

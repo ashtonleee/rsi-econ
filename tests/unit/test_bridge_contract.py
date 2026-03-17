@@ -21,6 +21,22 @@ TINY_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2Wb6wAAAAASUVORK5CYII="
 )
 
+TEST_AGENT_TOKEN = "test-agent-token"
+TEST_OPERATOR_TOKEN = "test-operator-token"
+
+
+def agent_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
+
+def setup_auth_env(monkeypatch):
+    monkeypatch.setenv("RSI_AGENT_TOKEN", TEST_AGENT_TOKEN)
+    monkeypatch.setenv("RSI_OPERATOR_TOKEN", TEST_OPERATOR_TOKEN)
+
 
 def load_events(log_path: Path) -> list[dict]:
     if not log_path.exists():
@@ -34,6 +50,7 @@ def load_events(log_path: Path) -> list[dict]:
 
 def test_bridge_health_contract(monkeypatch, tmp_path):
     monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
     with TestClient(app) as client:
         response = client.get("/healthz")
 
@@ -41,7 +58,7 @@ def test_bridge_health_contract(monkeypatch, tmp_path):
     body = response.json()
     assert body["service"] == "bridge"
     assert body["status"] == "ok"
-    assert body["stage"] == "stage6_read_only_browser"
+    assert body["stage"] == "stage8_consequential_actions"
     assert body["details"]["trusted_state_ready"] is True
     assert "litellm_reachable" in body["details"]
     assert "fetcher_reachable" in body["details"]
@@ -49,10 +66,27 @@ def test_bridge_health_contract(monkeypatch, tmp_path):
     assert body["details"]["log_path"].endswith("bridge_events.jsonl")
 
 
-def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tmp_path):
+def test_healthz_requires_no_auth(monkeypatch, tmp_path):
     monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
+    with TestClient(app) as client:
+        response = client.get("/healthz")
+    assert response.status_code == 200
+
+
+def test_status_rejects_unauthenticated(monkeypatch, tmp_path):
+    monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
     with TestClient(app) as client:
         response = client.get("/status")
+    assert response.status_code == 401
+
+
+def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tmp_path):
+    monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
+    with TestClient(app) as client:
+        response = client.get("/status", headers=agent_headers())
 
     assert response.status_code == 200
     body = response.json()
@@ -65,7 +99,8 @@ def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tm
     assert body["surfaces"]["read_only_web"] == "trusted_fetcher_stage5_read_only_get"
     assert body["surfaces"]["browser"] == "trusted_browser_stage6a_read_only_render"
     assert body["surfaces"]["browser_follow_href"] == "trusted_browser_stage6b_safe_follow_href"
-    assert body["surfaces"]["approvals"] == "stubbed_for_stage_7"
+    assert body["surfaces"]["approvals"] == "active_proposal_approval_flow_stage7"
+    assert body["surfaces"]["consequential_actions"] == "active_consequential_actions_stage8"
     assert body["log_path"].endswith("bridge_events.jsonl")
     assert body["operational_state_path"].endswith("operational_state.json")
     assert body["connections"]["litellm"]["url"].startswith("http://")
@@ -89,24 +124,52 @@ def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tm
     assert isinstance(body["recent_requests"], list)
 
 
-def test_status_query_logs_server_assigned_unauthenticated_actor(monkeypatch, tmp_path):
+def test_status_query_logs_authenticated_actor_identity(monkeypatch, tmp_path):
     monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
     with TestClient(app) as client:
-        response = client.get("/status", headers={"x-rsi-actor": "operator"})
-
+        response = client.get("/status", headers=agent_headers())
     assert response.status_code == 200
     events = load_events(tmp_path / "logs" / "bridge_events.jsonl")
-    status_events = [event for event in events if event["event_type"] == "status_query"]
+    status_events = [e for e in events if e["event_type"] == "status_query"]
     assert status_events
-    assert status_events[-1]["actor"] == "unauthenticated_bridge_client"
+    assert status_events[-1]["actor"] == "agent"
+
+
+def test_status_query_with_operator_token_logs_operator(monkeypatch, tmp_path):
+    monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
+    with TestClient(app) as client:
+        response = client.get("/status", headers=operator_headers())
+    assert response.status_code == 200
+    events = load_events(tmp_path / "logs" / "bridge_events.jsonl")
+    status_events = [e for e in events if e["event_type"] == "status_query"]
+    assert status_events
+    assert status_events[-1]["actor"] == "operator"
+
+
+def test_status_query_ignores_spoofed_actor_header(monkeypatch, tmp_path):
+    monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
+    with TestClient(app) as client:
+        headers = {**agent_headers(), "x-rsi-actor": "operator"}
+        response = client.get("/status", headers=headers)
+    assert response.status_code == 200
+    events = load_events(tmp_path / "logs" / "bridge_events.jsonl")
+    status_events = [e for e in events if e["event_type"] == "status_query"]
+    assert status_events
+    # Actor comes from token, not spoofed header
+    assert status_events[-1]["actor"] == "agent"
 
 
 def test_agent_run_events_ignore_spoofed_actor_header(monkeypatch, tmp_path):
     monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
     with TestClient(app) as client:
+        headers = {**agent_headers(), "x-rsi-actor": "operator"}
         response = client.post(
             "/agent/runs/events",
-            headers={"x-rsi-actor": "operator"},
+            headers=headers,
             json={
                 "run_id": "run-1",
                 "event_kind": "run_start",
@@ -270,13 +333,15 @@ def test_agent_facing_routes_ignore_spoofed_actor_headers(
     event_type,
 ):
     monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
     method_name, fake_method = _patched_route_result(case)
     monkeypatch.setattr(TrustedBridgeClients, method_name, fake_method)
 
     with TestClient(app) as client:
+        headers = {**agent_headers(), "x-rsi-actor": "operator"}
         response = client.post(
             path,
-            headers={"x-rsi-actor": "operator"},
+            headers=headers,
             json=payload,
         )
 
@@ -297,6 +362,7 @@ def test_agent_facing_routes_ignore_spoofed_actor_headers(
 
 def test_debug_probe_routes_are_disabled_by_default(monkeypatch, tmp_path):
     monkeypatch.setenv("RSI_TRUSTED_STATE_DIR", str(tmp_path))
+    setup_auth_env(monkeypatch)
     with TestClient(app) as client:
         response = client.post("/debug/probes/public-egress")
 

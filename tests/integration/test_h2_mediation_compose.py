@@ -10,6 +10,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_WORKSPACE_ROOT = ROOT / "untrusted" / "agent_workspace"
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env(*, state_root: Path, workspace_root: Path) -> dict[str, str]:
     env = os.environ.copy()
@@ -64,14 +75,16 @@ def compose_http_response(
     *,
     env: dict[str, str],
     payload: dict | None = None,
+    headers: dict | None = None,
 ) -> dict:
     code = (
         "import httpx, json\n"
         f"method = {method!r}\n"
         f"url = {url!r}\n"
         f"payload = {json.dumps(payload)!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
         "with httpx.Client(timeout=20.0) as client:\n"
-        "    response = client.request(method, url, json=json.loads(payload) if payload else None)\n"
+        "    response = client.request(method, url, json=json.loads(payload) if payload else None, headers=json.loads(headers))\n"
         "body = None\n"
         "try:\n"
         "    body = response.json()\n"
@@ -132,6 +145,7 @@ def test_h2_isolated_evidence_root_and_live_peer_evidence(compose_stack):
         "http://bridge:8000/web/fetch",
         env=compose_stack["env"],
         payload={"url": "http://allowed.test/allowed"},
+        headers=agent_auth_headers(),
     )
     assert fetch_response["status_code"] == 200
 
@@ -141,6 +155,7 @@ def test_h2_isolated_evidence_root_and_live_peer_evidence(compose_stack):
         "http://bridge:8000/web/browser/render",
         env=compose_stack["env"],
         payload={"url": "http://allowed.test/browser/redirect-allowed-two"},
+        headers=agent_auth_headers(),
     )
     assert render_response["status_code"] == 200
 
@@ -185,6 +200,7 @@ def test_h2_unapproved_additional_top_level_navigation_is_never_silent(compose_s
         "http://bridge:8000/web/browser/render",
         env=compose_stack["env"],
         payload={"url": url},
+        headers=agent_auth_headers(),
     )
     assert response["status_code"] == 403
 
@@ -226,6 +242,7 @@ def test_h2_blocked_channels_are_logged_even_if_page_partially_renders(compose_s
         "http://bridge:8000/web/browser/render",
         env=compose_stack["env"],
         payload={"url": url},
+        headers=agent_auth_headers(),
     )
     assert response["status_code"] in {200, 403}
 
@@ -261,6 +278,7 @@ def test_h2_follow_href_does_not_allow_unapproved_additional_navigation(compose_
             "source_url": source_url,
             "target_url": "http://allowed.test/browser/follow-meta-refresh-target",
         },
+        headers=agent_auth_headers(),
     )
     assert response["status_code"] == 403
 

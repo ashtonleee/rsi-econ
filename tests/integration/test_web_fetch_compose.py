@@ -14,6 +14,17 @@ STATE_PATH = ROOT / "runtime" / "trusted_state" / "state" / "operational_state.j
 WORKSPACE_ROOT = ROOT / "untrusted" / "agent_workspace"
 REPORT_PATH = WORKSPACE_ROOT / "reports" / "stage5_fixture_fetch_report.txt"
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -66,14 +77,16 @@ def compose_http_response(
     *,
     env: dict[str, str],
     payload: dict | None = None,
+    headers: dict | None = None,
 ) -> dict:
     code = (
         "import httpx, json\n"
         f"method = {method!r}\n"
         f"url = {url!r}\n"
         f"payload = {json.dumps(payload)!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
         "with httpx.Client(timeout=10.0) as client:\n"
-        "    response = client.request(method, url, json=json.loads(payload) if payload else None)\n"
+        "    response = client.request(method, url, json=json.loads(payload) if payload else None, headers=json.loads(headers))\n"
         "body = None\n"
         "try:\n"
         "    body = response.json()\n"
@@ -149,6 +162,7 @@ def test_allowed_fetch_succeeds_only_through_trusted_path_and_is_logged(compose_
         "http://bridge:8000/web/fetch",
         env=compose_stack,
         payload={"url": "http://allowed.test/allowed"},
+        headers=agent_auth_headers(),
     )
     assert fetched["status_code"] == 200
     body = fetched["json"]
@@ -182,6 +196,7 @@ def test_allowed_fetch_succeeds_only_through_trusted_path_and_is_logged(compose_
         "GET",
         "http://bridge:8000/status",
         env=compose_stack,
+        headers=agent_auth_headers(),
     )["json"]
     assert status["web"]["fetcher"]["reachable"] is True
     assert status["connections"]["egress"]["reachable"] is True
@@ -205,6 +220,7 @@ def test_denial_and_truncation_cases_are_enforced(compose_stack):
             "http://bridge:8000/web/fetch",
             env=compose_stack,
             payload={"url": url},
+            headers=agent_auth_headers(),
         )
         assert response["status_code"] in {400, 403}
 
@@ -214,6 +230,7 @@ def test_denial_and_truncation_cases_are_enforced(compose_stack):
         "http://bridge:8000/web/fetch",
         env=compose_stack,
         payload={"url": "http://allowed.test/redirect-blocked"},
+        headers=agent_auth_headers(),
     )
     assert redirect_denied["status_code"] == 403
 
@@ -223,6 +240,7 @@ def test_denial_and_truncation_cases_are_enforced(compose_stack):
         "http://bridge:8000/web/fetch",
         env=compose_stack,
         payload={"url": "http://allowed.test/binary"},
+        headers=agent_auth_headers(),
     )
     assert binary_denied["status_code"] == 415
 
@@ -232,6 +250,7 @@ def test_denial_and_truncation_cases_are_enforced(compose_stack):
         "http://bridge:8000/web/fetch",
         env=compose_stack,
         payload={"url": "http://allowed.test/large"},
+        headers=agent_auth_headers(),
     )
     assert large["status_code"] == 200
     assert large["json"]["truncated"] is True

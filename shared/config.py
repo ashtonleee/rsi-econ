@@ -36,6 +36,11 @@ DEFAULT_BROWSER_MAX_RENDERED_TEXT_BYTES = 16384
 DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES = 1024 * 1024
 DEFAULT_BROWSER_MAX_FOLLOWABLE_LINKS = 20
 DEFAULT_BROWSER_MAX_FOLLOW_HOPS = 1
+DEFAULT_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+DEFAULT_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+DEFAULT_ACTION_ALLOWLIST_HOSTS: tuple[str, ...] = ()
+DEFAULT_ACTION_MAX_BODY_BYTES = 65536
+DEFAULT_ACTION_MAX_RESPONSE_BYTES = 65536
 
 
 def _resolve_path(raw: str | None, default: Path) -> Path:
@@ -112,6 +117,11 @@ class BridgeSettings:
     browser_max_followable_links: int
     browser_max_follow_hops: int
     enable_debug_probes: bool
+    agent_token: str
+    operator_token: str
+    action_allowlist_hosts: tuple[str, ...]
+    action_max_body_bytes: int
+    action_max_response_bytes: int
 
 
 @dataclass(frozen=True)
@@ -160,6 +170,7 @@ class AgentSettings:
     runtime_code_dir: Path
     public_probe_url: str
     provider_probe_url: str
+    agent_token: str
 
 
 @dataclass(frozen=True)
@@ -273,9 +284,28 @@ def bridge_settings() -> BridgeSettings:
     assert browser_max_screenshot_bytes > 0
     assert browser_max_followable_links > 0
     assert browser_max_follow_hops == 1
+    agent_token = os.environ.get("RSI_AGENT_TOKEN", DEFAULT_AGENT_TOKEN).strip()
+    operator_token = os.environ.get("RSI_OPERATOR_TOKEN", DEFAULT_OPERATOR_TOKEN).strip()
+    assert agent_token, "RSI_AGENT_TOKEN must not be empty"
+    assert operator_token, "RSI_OPERATOR_TOKEN must not be empty"
+    assert agent_token != operator_token, "RSI_AGENT_TOKEN and RSI_OPERATOR_TOKEN must differ"
+    action_max_body_bytes = int(
+        os.environ.get(
+            "RSI_ACTION_MAX_BODY_BYTES",
+            str(DEFAULT_ACTION_MAX_BODY_BYTES),
+        ).strip()
+    )
+    action_max_response_bytes = int(
+        os.environ.get(
+            "RSI_ACTION_MAX_RESPONSE_BYTES",
+            str(DEFAULT_ACTION_MAX_RESPONSE_BYTES),
+        ).strip()
+    )
+    assert action_max_body_bytes > 0, "RSI_ACTION_MAX_BODY_BYTES must be positive"
+    assert action_max_response_bytes > 0, "RSI_ACTION_MAX_RESPONSE_BYTES must be positive"
     return BridgeSettings(
         service_name="bridge",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         trusted_state_dir=trusted_state_dir,
         log_dir=_resolve_path(
             os.environ.get("RSI_BRIDGE_LOG_DIR"),
@@ -329,6 +359,14 @@ def bridge_settings() -> BridgeSettings:
         browser_max_followable_links=browser_max_followable_links,
         browser_max_follow_hops=browser_max_follow_hops,
         enable_debug_probes=_env_flag("RSI_ENABLE_DEBUG_PROBES"),
+        agent_token=agent_token,
+        operator_token=operator_token,
+        action_allowlist_hosts=_split_csv(
+            os.environ.get("RSI_ACTION_ALLOWLIST_HOSTS"),
+            DEFAULT_ACTION_ALLOWLIST_HOSTS,
+        ),
+        action_max_body_bytes=action_max_body_bytes,
+        action_max_response_bytes=action_max_response_bytes,
     )
 
 
@@ -359,7 +397,7 @@ def fetcher_settings() -> FetcherSettings:
     )
     return FetcherSettings(
         service_name="fetcher",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         fetcher_url=os.environ.get("RSI_FETCHER_URL", DEFAULT_FETCHER_URL).strip(),
         egress_url=os.environ.get("RSI_EGRESS_URL", DEFAULT_EGRESS_URL).strip(),
         allowlist_hosts=_split_csv(
@@ -446,7 +484,7 @@ def browser_settings() -> BrowserSettings:
 
     return BrowserSettings(
         service_name="browser",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         browser_url=os.environ.get("RSI_BROWSER_URL", DEFAULT_BROWSER_URL).strip(),
         egress_url=os.environ.get("RSI_EGRESS_URL", DEFAULT_EGRESS_URL).strip(),
         allowlist_hosts=_split_csv(
@@ -481,10 +519,12 @@ def browser_settings() -> BrowserSettings:
 def agent_settings() -> AgentSettings:
     bridge_url = os.environ.get("RSI_BRIDGE_URL", DEFAULT_BRIDGE_URL).strip()
     assert bridge_url, "RSI_BRIDGE_URL must not be empty"
+    agent_token = os.environ.get("RSI_AGENT_TOKEN", DEFAULT_AGENT_TOKEN).strip()
+    assert agent_token, "RSI_AGENT_TOKEN must not be empty"
 
     return AgentSettings(
         service_name="agent",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         bridge_url=bridge_url,
         workspace_dir=_resolve_path(
             os.environ.get("RSI_AGENT_WORKSPACE_DIR"),
@@ -502,6 +542,7 @@ def agent_settings() -> AgentSettings:
             "RSI_PROVIDER_PROBE_URL",
             DEFAULT_PROVIDER_PROBE_URL,
         ).strip(),
+        agent_token=agent_token,
     )
 
 
@@ -522,7 +563,7 @@ def egress_settings() -> EgressSettings:
     assert web_timeout_seconds > 0
     return EgressSettings(
         service_name="egress",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         egress_url=os.environ.get("RSI_EGRESS_URL", DEFAULT_EGRESS_URL).strip(),
         allowlist_hosts=_split_csv(
             os.environ.get("RSI_WEB_ALLOWLIST_HOSTS"),

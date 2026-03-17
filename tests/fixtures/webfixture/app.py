@@ -829,3 +829,13 @@ async def browser_socket(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_text("fixture")
     await websocket.close()
+
+
+# --- Stage 8: Consequential action fixtures ---
+
+
+@app.post("/action/echo-post")
+async def action_echo_post(request: Request):
+    """Echo the POST body back as JSON. Used for Stage 8 consequential action tests."""
+    body = await request.json()
+    return {"echoed": body, "method": "POST", "path": "/action/echo-post"}

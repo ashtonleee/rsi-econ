@@ -147,6 +147,7 @@ class BridgeStatusReport(BaseModel):
     counters: dict[str, int]
     recent_requests: list[RecentRequest]
     surfaces: dict[str, str]
+    proposals: "ProposalState | None" = None
 
 
 class BridgeProbeReport(BaseModel):
@@ -350,6 +351,9 @@ class EgressFetchRequest(BaseModel):
     channel: str
     headers: dict[str, str] = Field(default_factory=dict)
     max_body_bytes: int = 0
+    method: str = "GET"
+    request_body_base64: str = ""
+    request_content_type: str = ""
 
 
 class EgressFetchResponse(BaseModel):
@@ -390,3 +394,54 @@ class EgressDecisionDrainRequest(BaseModel):
 
 class EgressDecisionDrainResponse(BaseModel):
     records: list[EgressDecisionRecord] = Field(default_factory=list)
+
+
+# --- Stage 7: Proposal / Approval Flow ---
+
+ProposalStatus = Literal["pending", "approved", "rejected", "executing", "executed", "failed"]
+
+
+class ProposalCreateRequest(BaseModel):
+    action_type: str
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProposalDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    reason: str = ""
+
+
+class ProposalRecord(BaseModel):
+    proposal_id: str
+    action_type: str
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+    status: ProposalStatus = "pending"
+    created_by: str = ""
+    created_at: str = ""
+    decided_by: str | None = None
+    decided_at: str | None = None
+    decision_reason: str | None = None
+    executed_by: str | None = None
+    executed_at: str | None = None
+    execution_result: dict[str, Any] | None = None
+    request_id: str = ""
+    trace_id: str = ""
+
+
+class ProposalListResponse(BaseModel):
+    proposals: list[ProposalRecord] = Field(default_factory=list)
+
+
+class ProposalState(BaseModel):
+    total: int = 0
+    pending: int = 0
+    approved: int = 0
+    rejected: int = 0
+    executing: int = 0
+    executed: int = 0
+    failed: int = 0
+    recent_proposals: list[ProposalRecord] = Field(default_factory=list)
+
+
+# Resolve forward reference in BridgeStatusReport
+BridgeStatusReport.model_rebuild()

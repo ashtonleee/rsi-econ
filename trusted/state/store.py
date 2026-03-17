@@ -106,6 +106,9 @@ class TrustedStateManager:
                 "status_queries": 0,
                 "system_events": 0,
                 "agent_run_events": 0,
+                "proposals_created": 0,
+                "proposals_decided": 0,
+                "proposals_executed": 0,
             },
             "connections": {
                 "bridge": {
@@ -486,6 +489,12 @@ class TrustedStateManager:
             self._snapshot["counters"]["status_queries"] += 1
         elif event_type == "agent_run":
             self._snapshot["counters"]["agent_run_events"] += 1
+        elif event_type == "proposal_created":
+            self._snapshot["counters"]["proposals_created"] += 1
+        elif event_type == "proposal_decided":
+            self._snapshot["counters"]["proposals_decided"] += 1
+        elif event_type == "proposal_executed":
+            self._snapshot["counters"]["proposals_executed"] += 1
 
         connections = summary.get("connections")
         if connections:

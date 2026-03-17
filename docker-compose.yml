@@ -23,6 +23,9 @@ services:
       RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
       RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
       RSI_ENABLE_DEBUG_PROBES: ${RSI_ENABLE_DEBUG_PROBES:-0}
+      RSI_AGENT_TOKEN: ${RSI_AGENT_TOKEN:-rsi-agent-token-dev-sentinel}
+      RSI_OPERATOR_TOKEN: ${RSI_OPERATOR_TOKEN:-rsi-operator-token-dev-sentinel}
+      RSI_ACTION_ALLOWLIST_HOSTS: ${RSI_ACTION_ALLOWLIST_HOSTS:-}
     volumes:
       - ${RSI_TRUSTED_STATE_HOST_DIR:-./runtime/trusted_state}:/var/lib/rsi/trusted_state
     depends_on:
@@ -202,6 +205,7 @@ services:
       RSI_BRIDGE_URL: http://bridge:8000
       RSI_AGENT_WORKSPACE_DIR: /workspace/agent
       RSI_AGENT_RUNTIME_CODE_DIR: /app/untrusted
+      RSI_AGENT_TOKEN: ${RSI_AGENT_TOKEN:-rsi-agent-token-dev-sentinel}
       HOME: /tmp
       TMPDIR: /tmp
     volumes:

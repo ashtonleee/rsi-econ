@@ -15,6 +15,17 @@ CHECKPOINT_DIR = ROOT / "runtime" / "trusted_state" / "checkpoints"
 WORKSPACE_ROOT = ROOT / "untrusted" / "agent_workspace"
 BASELINE_ROOT = ROOT / "trusted" / "recovery" / "seed_workspace_baseline"
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -64,13 +75,15 @@ def compose_http_json(
     url: str,
     *,
     env: dict[str, str],
+    headers: dict | None = None,
 ) -> dict:
     code = (
         "import httpx, json\n"
         f"method = {method!r}\n"
         f"url = {url!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
         "with httpx.Client(timeout=10.0) as client:\n"
-        "    response = client.request(method, url)\n"
+        "    response = client.request(method, url, headers=json.loads(headers))\n"
         "response.raise_for_status()\n"
         "print(json.dumps(response.json()))\n"
     )
@@ -184,6 +197,7 @@ def test_recovery_controls_revert_workspace_and_update_trusted_state(compose_sta
         "GET",
         "http://127.0.0.1:8000/status",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
     assert status["recovery"]["baseline_id"] == listed["baseline"]["baseline_id"]
     assert status["recovery"]["latest_checkpoint_id"] == checkpoint_id
@@ -233,6 +247,7 @@ def test_recovery_artifacts_survive_compose_down_up(compose_stack):
         "GET",
         "http://127.0.0.1:8000/status",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
     assert status["recovery"]["latest_checkpoint_id"] == checkpoint_id
     assert any(
@@ -244,7 +259,8 @@ def test_recovery_artifacts_survive_compose_down_up(compose_stack):
 def test_recovery_cli_and_bridge_requests_do_not_corrupt_canonical_state(compose_stack):
     bridge_burst = (
         "import httpx\n"
-        "with httpx.Client(base_url='http://bridge:8000', timeout=5.0) as client:\n"
+        f"headers = {json.dumps(agent_auth_headers())}\n"
+        "with httpx.Client(base_url='http://bridge:8000', timeout=5.0, headers=headers) as client:\n"
         "    for _ in range(12):\n"
         "        response = client.get('/status')\n"
         "        response.raise_for_status()\n"

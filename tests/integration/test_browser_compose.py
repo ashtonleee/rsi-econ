@@ -26,6 +26,17 @@ FOLLOW_CAPTURE_REPORT_PATH = WORKSPACE_ROOT / "research" / "current_follow_captu
 FOLLOW_TEXT_PATH = WORKSPACE_ROOT / "research" / "current_follow_rendered_text.txt"
 FOLLOW_CAPTURE_SCREENSHOT_PATH = WORKSPACE_ROOT / "research" / "current_follow_screenshot.png"
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -78,14 +89,16 @@ def compose_http_response(
     *,
     env: dict[str, str],
     payload: dict | None = None,
+    headers: dict | None = None,
 ) -> dict:
     code = (
         "import httpx, json\n"
         f"method = {method!r}\n"
         f"url = {url!r}\n"
         f"payload = {json.dumps(payload)!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
         "with httpx.Client(timeout=20.0) as client:\n"
-        "    response = client.request(method, url, json=json.loads(payload) if payload else None)\n"
+        "    response = client.request(method, url, json=json.loads(payload) if payload else None, headers=json.loads(headers))\n"
         "body = None\n"
         "try:\n"
         "    body = response.json()\n"
@@ -203,6 +216,7 @@ def test_browser_render_succeeds_only_through_trusted_path(compose_stack):
         "http://bridge:8000/web/browser/render",
         env=compose_stack,
         payload={"url": "http://allowed.test/browser/rendered"},
+        headers=agent_auth_headers(),
     )
     assert rendered["status_code"] == 200
     body = rendered["json"]
@@ -293,6 +307,7 @@ def test_browser_fails_closed_and_status_exposes_browser_state(compose_stack):
             "http://bridge:8000/web/browser/render",
             env=compose_stack,
             payload={"url": url},
+            headers=agent_auth_headers(),
         )
         assert response["status_code"] == 403
 
@@ -301,6 +316,7 @@ def test_browser_fails_closed_and_status_exposes_browser_state(compose_stack):
         "GET",
         "http://bridge:8000/status",
         env=compose_stack,
+        headers=agent_auth_headers(),
     )["json"]
     assert status["browser"]["service"]["reachable"] is True
     assert status["browser"]["caps"]["viewport_width"] == 1280
@@ -315,6 +331,7 @@ def test_browser_fails_closed_and_status_exposes_browser_state(compose_stack):
         "POST",
         "http://bridge:8000/debug/probes/public-egress",
         env=compose_stack,
+        headers=agent_auth_headers(),
     )
     assert probe_response["status_code"] == 404
 
@@ -327,6 +344,7 @@ def test_browser_follow_href_succeeds_only_through_trusted_path(compose_stack):
         "http://bridge:8000/web/browser/render",
         env=compose_stack,
         payload={"url": source_url},
+        headers=agent_auth_headers(),
     )
     assert source["status_code"] == 200
     links = source["json"]["followable_links"]
@@ -347,6 +365,7 @@ def test_browser_follow_href_succeeds_only_through_trusted_path(compose_stack):
         "http://bridge:8000/web/browser/follow-href",
         env=compose_stack,
         payload={"source_url": source_url, "target_url": same_origin["target_url"]},
+        headers=agent_auth_headers(),
     )
     assert same_response["status_code"] == 200
     same_body = same_response["json"]
@@ -366,6 +385,7 @@ def test_browser_follow_href_succeeds_only_through_trusted_path(compose_stack):
         "http://bridge:8000/web/browser/follow-href",
         env=compose_stack,
         payload={"source_url": source_url, "target_url": cross_origin["target_url"]},
+        headers=agent_auth_headers(),
     )
     assert cross_response["status_code"] == 200
     cross_body = cross_response["json"]
@@ -413,6 +433,7 @@ def test_browser_follow_href_fails_closed_and_status_exposes_follow_state(compos
             "http://bridge:8000/web/browser/follow-href",
             env=compose_stack,
             payload={"source_url": source_url, "target_url": target_url},
+            headers=agent_auth_headers(),
         )
         assert response["status_code"] == 403
 
@@ -421,6 +442,7 @@ def test_browser_follow_href_fails_closed_and_status_exposes_follow_state(compos
         "GET",
         "http://bridge:8000/status",
         env=compose_stack,
+        headers=agent_auth_headers(),
     )["json"]
     assert status["browser"]["service"]["reachable"] is True
     assert status["browser"]["counters"]["browser_follow_href_total"] >= 1
@@ -436,6 +458,7 @@ def test_browser_follow_href_fails_closed_and_status_exposes_follow_state(compos
         "POST",
         "http://bridge:8000/debug/probes/public-egress",
         env=compose_stack,
+        headers=agent_auth_headers(),
     )
     assert probe_response["status_code"] == 404
 
@@ -488,6 +511,7 @@ def test_seed_runner_single_url_capture_packet_writes_artifacts_and_recovery_res
         "http://bridge:8000/web/browser/render",
         env=compose_stack,
         payload={"url": input_url},
+        headers=agent_auth_headers(),
     )
     assert direct["status_code"] == 200
     direct_body = direct["json"]
@@ -567,6 +591,7 @@ def test_seed_runner_single_source_answer_packet_writes_artifacts_logs_llm_and_r
         "http://bridge:8000/web/browser/render",
         env=compose_stack,
         payload={"url": input_url},
+        headers=agent_auth_headers(),
     )
     assert direct["status_code"] == 200
     direct_body = direct["json"]
@@ -674,6 +699,7 @@ def test_seed_runner_follow_answer_packet_writes_artifacts_logs_llm_and_resets(c
         "http://bridge:8000/web/browser/follow-href",
         env=compose_stack,
         payload={"source_url": source_url, "target_url": follow_target_url},
+        headers=agent_auth_headers(),
     )
     assert direct["status_code"] == 200
     direct_body = direct["json"]

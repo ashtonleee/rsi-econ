@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from shared.config import bridge_settings
@@ -26,14 +26,22 @@ from shared.schemas import (
     EgressProbeReport,
     FetcherFetchResponse,
     HealthReport,
+    ProposalCreateRequest,
+    ProposalDecisionRequest,
+    ProposalListResponse,
+    ProposalRecord,
+    ProposalState,
     RecentRequest,
     RecoveryState,
     WebFetchRequest,
     WebFetchResponse,
     WebState,
 )
+from trusted.bridge.auth import resolve_identity
 from trusted.bridge.clients import TrustedBridgeClients
+from trusted.bridge.executor import execute_proposal
 from trusted.recovery.store import WorkspaceRecoveryStore
+from trusted.state.proposals import ProposalStore
 from trusted.state.store import TrustedStateManager, utc_now_iso
 
 
@@ -63,8 +71,8 @@ def build_surfaces() -> dict[str, str]:
         "read_only_web": "trusted_fetcher_stage5_read_only_get",
         "browser": "trusted_browser_stage6a_read_only_render",
         "browser_follow_href": "trusted_browser_stage6b_safe_follow_href",
-        "approvals": "stubbed_for_stage_7",
-        "consequential_actions": "stubbed_for_stage_8",
+        "approvals": "active_proposal_approval_flow_stage7",
+        "consequential_actions": "active_consequential_actions_stage8",
     }
 
 
@@ -103,12 +111,13 @@ def make_headers(request_id: str, trace_id: str) -> dict[str, str]:
     }
 
 
-def status_route_actor() -> str:
-    return "unauthenticated_bridge_client"
-
-
-def agent_route_actor() -> str:
-    return "agent"
+def authenticated_actor(authorization: str | None = Header(None)) -> str:
+    """FastAPI dependency: resolve caller identity from Authorization header."""
+    return resolve_identity(
+        authorization,
+        agent_token=app.state.settings.agent_token,
+        operator_token=app.state.settings.operator_token,
+    )
 
 
 def request_identity() -> tuple[str, str]:
@@ -165,6 +174,7 @@ async def trusted_connections_payload() -> dict[str, dict]:
 
 
 def make_status_report(snapshot: dict) -> BridgeStatusReport:
+    proposal_summary = app.state.proposal_store.summary()
     return BridgeStatusReport(
         service=app.state.settings.service_name,
         stage=app.state.settings.stage,
@@ -185,6 +195,7 @@ def make_status_report(snapshot: dict) -> BridgeStatusReport:
             for payload in snapshot["recent_requests"]
         ],
         surfaces=dict(snapshot["surfaces"]),
+        proposals=ProposalState(**proposal_summary),
     )
 
 
@@ -259,6 +270,7 @@ def run_startup_checks(app: FastAPI):
         web_defaults=web_defaults_for(settings),
         browser_defaults=browser_defaults_for(settings),
     )
+    app.state.proposal_store = ProposalStore(settings.state_dir / "proposals")
     app.state.clients = TrustedBridgeClients.with_egress(
         litellm_url=settings.litellm_url,
         fetcher_url=settings.fetcher_url,
@@ -348,7 +360,7 @@ async def healthz() -> HealthReport:
 
 
 @app.get("/status", response_model=BridgeStatusReport)
-async def status(request: Request, response: Response) -> BridgeStatusReport:
+async def status(request: Request, response: Response, actor: str = Depends(authenticated_actor)) -> BridgeStatusReport:
     request_id, trace_id = request_identity()
     snapshot = app.state.state_manager.snapshot(refresh=True)
     connections = await trusted_connections_payload()
@@ -358,7 +370,7 @@ async def status(request: Request, response: Response) -> BridgeStatusReport:
     status_browser["service"] = connections["browser"]
     append_event(
         event_type="status_query",
-        actor=status_route_actor(),
+        actor=actor,
         request_id=request_id,
         trace_id=trace_id,
         outcome="success",
@@ -385,11 +397,12 @@ async def agent_run_event(
     payload: AgentRunEventRequest,
     request: Request,
     response: Response,
+    actor: str = Depends(authenticated_actor),
 ) -> AgentRunEventReceipt:
     request_id, trace_id = request_identity()
     append_event(
         event_type="agent_run",
-        actor=agent_route_actor(),
+        actor=actor,
         request_id=request_id,
         trace_id=trace_id,
         outcome="recorded",
@@ -411,13 +424,178 @@ async def agent_run_event(
     )
 
 
+@app.post("/proposals", response_model=ProposalRecord)
+async def create_proposal(
+    payload: ProposalCreateRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> ProposalRecord:
+    request_id, trace_id = request_identity()
+    record = app.state.proposal_store.create_proposal(
+        action_type=payload.action_type,
+        action_payload=payload.action_payload,
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+    )
+    append_event(
+        event_type="proposal_created",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary={
+            "proposal_id": record.proposal_id,
+            "action_type": record.action_type,
+            "action_payload": record.action_payload,
+        },
+    )
+    response.headers.update(make_headers(request_id, trace_id))
+    return record
+
+
+@app.get("/proposals", response_model=ProposalListResponse)
+async def list_proposals(
+    status: str | None = None,
+    actor: str = Depends(authenticated_actor),
+) -> ProposalListResponse:
+    records = app.state.proposal_store.list_proposals(status_filter=status)
+    return ProposalListResponse(proposals=records)
+
+
+@app.get("/proposals/{proposal_id}", response_model=ProposalRecord)
+async def get_proposal(
+    proposal_id: str,
+    actor: str = Depends(authenticated_actor),
+) -> ProposalRecord | JSONResponse:
+    record = app.state.proposal_store.get_proposal(proposal_id)
+    if record is None:
+        return JSONResponse(status_code=404, content={"detail": "proposal not found"})
+    return record
+
+
+@app.post("/proposals/{proposal_id}/decide", response_model=ProposalRecord)
+async def decide_proposal(
+    proposal_id: str,
+    payload: ProposalDecisionRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> ProposalRecord | JSONResponse:
+    if actor != "operator":
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "only operator can decide proposals"},
+        )
+    request_id, trace_id = request_identity()
+    try:
+        record = app.state.proposal_store.decide_proposal(
+            proposal_id,
+            decision=payload.decision,
+            decided_by=actor,
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 409
+        return JSONResponse(status_code=status_code, content={"detail": str(exc)})
+    append_event(
+        event_type="proposal_decided",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary={
+            "proposal_id": proposal_id,
+            "decision": payload.decision,
+            "reason": payload.reason,
+        },
+    )
+    response.headers.update(make_headers(request_id, trace_id))
+    return record
+
+
+@app.post("/proposals/{proposal_id}/execute", response_model=ProposalRecord)
+async def execute_approved_proposal(
+    proposal_id: str,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> ProposalRecord | JSONResponse:
+    if actor != "operator":
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "only operator can execute proposals"},
+        )
+    request_id, trace_id = request_identity()
+    # Atomically claim the proposal before dispatching any side effects.
+    # This prevents the TOCTOU race where two concurrent /execute requests
+    # both pass a status check and both fire outbound POSTs.
+    try:
+        record = app.state.proposal_store.claim_for_execution(
+            proposal_id, claimed_by=actor,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+    append_event(
+        event_type="proposal_claimed",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary={"proposal_id": proposal_id, "action_type": record.action_type},
+    )
+    # Dispatch the action. If the executor crashes, mark the proposal failed
+    # so it doesn't stay stuck in 'executing' permanently.
+    try:
+        result = await execute_proposal(
+            record,
+            clients=app.state.clients,
+            action_allowlist_hosts=set(app.state.settings.action_allowlist_hosts),
+            action_max_body_bytes=app.state.settings.action_max_body_bytes,
+            action_max_response_bytes=app.state.settings.action_max_response_bytes,
+        )
+        record = app.state.proposal_store.mark_executed(
+            proposal_id, executed_by=actor, result=result,
+        )
+    except Exception as exc:
+        app.state.proposal_store.mark_failed(
+            proposal_id, failed_by=actor, error=f"{type(exc).__name__}: {exc}",
+        )
+        append_event(
+            event_type="proposal_failed",
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="error",
+            summary={"proposal_id": proposal_id, "error": f"{type(exc).__name__}: {exc}"},
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"execution failed: {type(exc).__name__}: {exc}"},
+        )
+    # Canonical log gets metadata only — strip response_body_preview and detail
+    log_result = {k: v for k, v in result.items() if k not in ("response_body_preview", "detail")}
+    append_event(
+        event_type="proposal_executed",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary={
+            "proposal_id": proposal_id,
+            "action_type": record.action_type,
+            "result": log_result,
+        },
+    )
+    response.headers.update(make_headers(request_id, trace_id))
+    return record
+
+
 @app.post("/llm/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     payload: ChatCompletionRequest,
     request: Request,
+    actor: str = Depends(authenticated_actor),
 ) -> ChatCompletionResponse | JSONResponse:
     request_id, trace_id = request_identity()
-    actor = agent_route_actor()
     snapshot = app.state.state_manager.snapshot(refresh=True)
     estimated_usage = deterministic_usage(payload.messages)
 
@@ -728,9 +906,9 @@ async def bridge_fetch(
     payload: WebFetchRequest,
     request: Request,
     response: Response,
+    actor: str = Depends(authenticated_actor),
 ) -> WebFetchResponse | JSONResponse:
     request_id, trace_id = request_identity()
-    actor = agent_route_actor()
 
     try:
         fetch_result = await app.state.clients.fetch_url(payload)
@@ -813,9 +991,9 @@ async def bridge_browser_render(
     payload: BrowserRenderRequest,
     request: Request,
     response: Response,
+    actor: str = Depends(authenticated_actor),
 ) -> BrowserRenderResponse | JSONResponse:
     request_id, trace_id = request_identity()
-    actor = agent_route_actor()
 
     try:
         render_result = await app.state.clients.browser_render(payload)
@@ -898,9 +1076,9 @@ async def bridge_browser_follow_href(
     payload: BrowserFollowHrefRequest,
     request: Request,
     response: Response,
+    actor: str = Depends(authenticated_actor),
 ) -> BrowserFollowHrefResponse | JSONResponse:
     request_id, trace_id = request_identity()
-    actor = agent_route_actor()
 
     try:
         follow_result = await app.state.clients.browser_follow_href(payload)

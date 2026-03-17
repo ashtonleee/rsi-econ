@@ -28,7 +28,7 @@ def _append_events_worker(
         operational_state_path=Path(state_path),
         budget_total=100,
         budget_unit="mock_tokens",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         surfaces={"canonical_logging": "active_canonical_event_log"},
     )
     start_event.wait()
@@ -125,7 +125,7 @@ def test_trusted_state_manager_rebuilds_from_canonical_log_when_snapshot_is_corr
         operational_state_path=state_path,
         budget_total=30,
         budget_unit="mock_tokens",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         surfaces={"canonical_logging": "active_canonical_event_log"},
     )
 
@@ -316,7 +316,7 @@ def test_trusted_state_manager_materializes_browser_render_state(tmp_path):
         operational_state_path=state_path,
         budget_total=30,
         budget_unit="mock_tokens",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         surfaces={
             "canonical_logging": "active_canonical_event_log",
             "budgeting": "enforced_token_cap_stage2",
@@ -398,7 +398,7 @@ def test_trusted_state_manager_materializes_browser_follow_state(tmp_path):
         operational_state_path=state_path,
         budget_total=30,
         budget_unit="mock_tokens",
-        stage="stage6_read_only_browser",
+        stage="stage8_consequential_actions",
         surfaces={
             "canonical_logging": "active_canonical_event_log",
             "budgeting": "enforced_token_cap_stage2",

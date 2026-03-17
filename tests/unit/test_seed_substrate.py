@@ -47,7 +47,7 @@ class FakeBridgeClient:
         self.status_calls += 1
         return BridgeStatusReport(
             service="bridge",
-            stage="stage6_read_only_browser",
+            stage="stage8_consequential_actions",
             trusted_state_dir="/var/lib/rsi/trusted_state",
             log_path="/var/lib/rsi/trusted_state/logs/bridge_events.jsonl",
             operational_state_path="/var/lib/rsi/trusted_state/state/operational_state.json",

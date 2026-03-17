@@ -31,6 +31,8 @@ CHANNEL_POLICIES: dict[str, ChannelDisposition] = {
     "external_protocol": "deny_and_log",
     "worker": "deny_and_log",
     "subresource": "deny_and_log",
+    # Stage 8: consequential actions via proposal/approval flow
+    "consequential_action": "classify_and_deny_when_unapproved",
 }
 
 

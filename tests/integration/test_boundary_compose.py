@@ -13,6 +13,17 @@ STATE_PATH = ROOT / "runtime" / "trusted_state" / "state" / "operational_state.j
 SENTINEL_PROVIDER_KEY = "stage1-sentinel-provider-key"
 BUDGET_CAP = 40
 
+TEST_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
+TEST_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
+
+
+def agent_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_AGENT_TOKEN}"}
+
+
+def operator_auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TEST_OPERATOR_TOKEN}"}
+
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
@@ -63,8 +74,9 @@ def compose_http_json(
     url: str,
     *,
     env: dict[str, str],
+    headers: dict | None = None,
 ) -> dict:
-    return compose_http_response(service, method, url, env=env)["json"]
+    return compose_http_response(service, method, url, env=env, headers=headers)["json"]
 
 
 def compose_http_response(
@@ -160,6 +172,7 @@ def test_compose_stack_starts_and_reports_litellm_health(compose_stack):
         "GET",
         "http://127.0.0.1:8000/status",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
     assert body["connections"]["litellm"]["reachable"] is True
     assert body["connections"]["egress"]["reachable"] is True
@@ -186,7 +199,7 @@ def test_compose_stack_starts_and_reports_litellm_health(compose_stack):
 
     events = load_events()
     assert any(event["event_type"] == "status_query" for event in events)
-    assert any(event["event_type"] == "status_query" and event["actor"] == "unauthenticated_bridge_client" for event in events)
+    assert any(event["event_type"] == "status_query" and event["actor"] == "operator" for event in events)
 
 
 def test_boundary_denies_direct_egress_and_allows_bridge_mediated_llm(compose_stack):
@@ -200,12 +213,14 @@ def test_boundary_denies_direct_egress_and_allows_bridge_mediated_llm(compose_st
         "POST",
         "http://127.0.0.1:8000/debug/probes/public-egress",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
     provider_probe = compose_http_json(
         "bridge",
         "POST",
         "http://127.0.0.1:8000/debug/probes/provider-egress",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
 
     assert public_probe["outcome"] == "denied"
@@ -220,6 +235,7 @@ def test_boundary_denies_direct_egress_and_allows_bridge_mediated_llm(compose_st
             "model": "stage2-deterministic",
             "messages": [{"role": "user", "content": "stage2 boundary proof"}],
         },
+        headers=agent_auth_headers(),
     )
     assert chat["status_code"] == 200
     payload = chat["json"]
@@ -283,6 +299,7 @@ def test_budget_cap_denies_further_llm_calls_and_logs_denial(compose_stack):
         "GET",
         "http://127.0.0.1:8000/status",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
     while status["budget"]["exhausted"] is False:
         attempt = compose_http_response(
@@ -294,6 +311,7 @@ def test_budget_cap_denies_further_llm_calls_and_logs_denial(compose_stack):
                 "model": "stage2-deterministic",
                 "messages": [{"role": "user", "content": "x"}],
             },
+            headers=agent_auth_headers(),
         )
         if attempt["status_code"] != 200:
             break
@@ -302,6 +320,7 @@ def test_budget_cap_denies_further_llm_calls_and_logs_denial(compose_stack):
             "GET",
             "http://127.0.0.1:8000/status",
             env=compose_stack,
+            headers=operator_auth_headers(),
         )
 
     assert status["budget"]["exhausted"] is True
@@ -314,6 +333,7 @@ def test_budget_cap_denies_further_llm_calls_and_logs_denial(compose_stack):
             "model": "stage2-deterministic",
             "messages": [{"role": "user", "content": "x"}],
         },
+        headers=agent_auth_headers(),
     )
     assert denied["status_code"] == 402
     assert denied["headers"]["x-request-id"]
@@ -419,6 +439,7 @@ def test_agent_can_query_status_but_cannot_modify_trusted_state(compose_stack):
         "http://bridge:8000/status",
         env=compose_stack,
         payload={"budget": "tamper"},
+        headers=agent_auth_headers(),
     )
     assert mutate["status_code"] == 405
 
@@ -429,7 +450,7 @@ def test_spoofed_actor_headers_do_not_change_canonical_actor_and_runtime_root_is
         "GET",
         "http://bridge:8000/status",
         env=compose_stack,
-        headers={"x-rsi-actor": "operator"},
+        headers={**agent_auth_headers(), "x-rsi-actor": "operator"},
     )
     assert status["status_code"] == 200
 
@@ -437,7 +458,7 @@ def test_spoofed_actor_headers_do_not_change_canonical_actor_and_runtime_root_is
     assert any(
         event["event_type"] == "status_query"
         and event["request_id"] == status["headers"]["x-request-id"]
-        and event["actor"] == "unauthenticated_bridge_client"
+        and event["actor"] == "agent"
         for event in events
     )
 
@@ -446,7 +467,7 @@ def test_spoofed_actor_headers_do_not_change_canonical_actor_and_runtime_root_is
         "POST",
         "http://bridge:8000/agent/runs/events",
         env=compose_stack,
-        headers={"x-rsi-actor": "operator"},
+        headers={**agent_auth_headers(), "x-rsi-actor": "operator"},
         payload={
             "run_id": "actor-spoof-run",
             "event_kind": "run_start",
@@ -489,6 +510,7 @@ def test_operational_state_persists_across_bridge_restart(compose_stack):
         "GET",
         "http://127.0.0.1:8000/status",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
     compose_command(["restart", "bridge"], env=compose_stack)
     compose_command(["up", "-d", "--wait", "bridge"], env=compose_stack)
@@ -497,6 +519,7 @@ def test_operational_state_persists_across_bridge_restart(compose_stack):
         "GET",
         "http://127.0.0.1:8000/status",
         env=compose_stack,
+        headers=operator_auth_headers(),
     )
 
     assert after["budget"]["spent"] == before["budget"]["spent"]
