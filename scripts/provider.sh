@@ -9,13 +9,32 @@ ANSWER_PACKET_PLAN="${RSI_PROVIDER_ANSWER_PACKET_PLAN:-$WORKSPACE_DIR/.seed_plan
 FOLLOW_ANSWER_PACKET_PLAN="${RSI_PROVIDER_FOLLOW_ANSWER_PACKET_PLAN:-$WORKSPACE_DIR/.seed_plans/stage6_follow_answer_packet.json}"
 SENTINEL_PROVIDER_KEY="stage1-sentinel-provider-key"
 
+resolve_python_bin() {
+    if [[ -n "${PYTHON:-}" ]]; then
+        printf '%s\n' "$PYTHON"
+        return
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s\n' "python3"
+        return
+    fi
+    if command -v python >/dev/null 2>&1; then
+        printf '%s\n' "python"
+        return
+    fi
+    echo "python3 or python is required" >&2
+    exit 1
+}
+
+PYTHON_BIN="$(resolve_python_bin)"
+
 usage() {
     cat <<EOF
 Usage:
   ./scripts/provider.sh init
   ./scripts/provider.sh up
   ./scripts/provider.sh smoke [--model MODEL] [--message MESSAGE]
-  ./scripts/provider.sh seed-run --script SCRIPT --task TASK [--input-url URL] [--follow-target-url URL] [--model MODEL] [--max-steps N]
+  ./scripts/provider.sh seed-run --script SCRIPT --task TASK [--input-url URL] [--follow-target-url URL] [--proposal-target-url URL] [--model MODEL] [--max-steps N]
   ./scripts/provider.sh answer-packet --task TASK --input-url URL [--model MODEL] [--max-steps N]
   ./scripts/provider.sh follow-answer-packet --task TASK --input-url URL --follow-target-url URL [--model MODEL] [--max-steps N]
 
@@ -86,7 +105,7 @@ render_seed_run_plan() {
     local target_plan="$2"
     local model="$3"
 
-    MODEL="$model" SOURCE_PLAN="$source_plan" TARGET_PLAN="$target_plan" python - <<'PY'
+    MODEL="$model" SOURCE_PLAN="$source_plan" TARGET_PLAN="$target_plan" "$PYTHON_BIN" - <<'PY'
 import json
 import os
 import re
@@ -125,6 +144,7 @@ provider_seed_run() {
     local task=""
     local input_url=""
     local follow_target_url=""
+    local proposal_target_url=""
     local model
     local max_steps=""
     model="$(provider_seed_run_default_model)"
@@ -145,6 +165,10 @@ provider_seed_run() {
                 ;;
             --follow-target-url)
                 follow_target_url="$2"
+                shift 2
+                ;;
+            --proposal-target-url)
+                proposal_target_url="$2"
                 shift 2
                 ;;
             --model)
@@ -200,6 +224,9 @@ provider_seed_run() {
     fi
     if [[ -n "$follow_target_url" ]]; then
         cmd+=(--follow-target-url "$follow_target_url")
+    fi
+    if [[ -n "$proposal_target_url" ]]; then
+        cmd+=(--proposal-target-url "$proposal_target_url")
     fi
     if [[ -n "$max_steps" ]]; then
         cmd+=(--max-steps "$max_steps")

@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:8000"
 DEFAULT_WORKSPACE_DIR = ROOT / "untrusted" / "agent_workspace"
 DEFAULT_TRUSTED_STATE_DIR = ROOT / "runtime" / "trusted_state"
+DEFAULT_OPERATOR_RUNTIME_DIR = ROOT / "runtime" / "operator_console"
 
 
 def _resolve_path(raw: str | None, default: Path) -> Path:
@@ -24,6 +25,11 @@ class ConsoleSettings:
     operator_token: str | None
     workspace_dir: Path
     trusted_state_dir: Path
+    operator_runtime_dir: Path = DEFAULT_OPERATOR_RUNTIME_DIR
+
+    @property
+    def repo_root(self) -> Path:
+        return ROOT
 
     @property
     def run_outputs_dir(self) -> Path:
@@ -36,6 +42,14 @@ class ConsoleSettings:
     @property
     def trusted_log_path(self) -> Path:
         return self.trusted_state_dir / "logs" / "bridge_events.jsonl"
+
+    @property
+    def launches_dir(self) -> Path:
+        return self.operator_runtime_dir / "launches"
+
+    @property
+    def launch_logs_dir(self) -> Path:
+        return self.operator_runtime_dir / "launch_logs"
 
 
 def console_settings() -> ConsoleSettings:
@@ -54,5 +68,8 @@ def console_settings() -> ConsoleSettings:
             os.environ.get("RSI_OPERATOR_CONSOLE_TRUSTED_STATE_DIR"),
             DEFAULT_TRUSTED_STATE_DIR,
         ),
+        operator_runtime_dir=_resolve_path(
+            os.environ.get("RSI_OPERATOR_CONSOLE_RUNTIME_DIR"),
+            DEFAULT_OPERATOR_RUNTIME_DIR,
+        ),
     )
-

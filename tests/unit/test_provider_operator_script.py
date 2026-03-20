@@ -258,6 +258,8 @@ def test_provider_seed_run_rewrites_all_bridge_chat_models_and_passes_optional_i
         "https://example.com/follow-source",
         "--follow-target-url",
         "https://example.com/follow-target",
+        "--proposal-target-url",
+        "https://example.com/post-target",
         "--max-steps",
         "12",
         "--model",
@@ -294,6 +296,7 @@ def test_provider_seed_run_rewrites_all_bridge_chat_models_and_passes_optional_i
     )
     assert "--input-url https://example.com/follow-source" in log
     assert "--follow-target-url https://example.com/follow-target" in log
+    assert "--proposal-target-url https://example.com/post-target" in log
     assert "--max-steps 12" in log
     assert log.count('"model": "openai/gpt-4.1-mini"') == 2
     assert '"model": "stage1-deterministic"' not in log

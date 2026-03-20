@@ -9,6 +9,21 @@
     </section>
   {% endif %}
 
+  <section class="panel">
+    <div class="hero">
+      <div>
+        <h2 style="margin-bottom: 0.35rem;">Start Agent</h2>
+        <div class="muted">Launch a seeded task, then watch its step timeline and approval state from the console.</div>
+      </div>
+      <div class="inline-actions">
+        <a class="button primary" href="/launches">Open Launch Control</a>
+        {% if latest_pending %}
+          <a class="button warn" href="/proposals/{{ latest_pending.proposal_id }}">Pending Approval</a>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
   <section class="grid two">
     <article class="panel">
       <h2>Current State</h2>
@@ -66,7 +81,7 @@
     </article>
 
     <article class="panel">
-      <h2>Quick Links</h2>
+      <h2>Operator Loop</h2>
       <div class="meta-list">
         <div class="meta-row">
           <dt>Bridge URL</dt>
@@ -83,6 +98,21 @@
       </div>
 
       <div style="margin-top: 1rem;" class="artifact-list">
+        {% if active_launch %}
+          <a class="artifact-card" href="/launches/{{ active_launch.launch_id }}">
+            <div>
+              <strong>Active Launch</strong>
+              <div><code>{{ active_launch.launch_id }}</code></div>
+              <div class="muted">{{ active_launch.task }}</div>
+            </div>
+            <div>
+              <span class="pill warn">{{ active_launch.status }}</span>
+            </div>
+          </a>
+        {% else %}
+          <div class="empty">No live launch is running right now. Use Launch Control to start a new seeded run.</div>
+        {% endif %}
+
         {% if latest_run %}
           <a class="artifact-card" href="/runs/{{ latest_run.name }}">
             <div>
@@ -116,4 +146,3 @@
     </article>
   </section>
 {% endblock %}
-

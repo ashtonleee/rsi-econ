@@ -54,6 +54,39 @@
         </div>
       </dl>
 
+      {% if proposal.status == "pending" %}
+        <section class="panel" style="box-shadow: none; margin-top: 1rem;">
+          <h3>Decision Actions</h3>
+          <div class="grid two">
+            <form method="post" action="/proposals/{{ proposal.proposal_id }}/approve">
+              <input type="hidden" name="redirect_to" value="/proposals/{{ proposal.proposal_id }}">
+              <div class="field">
+                <label for="approve-reason">Approve reason</label>
+                <textarea id="approve-reason" name="reason" placeholder="Optional operator note">approved from operator console</textarea>
+              </div>
+              <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
+            </form>
+
+            <form method="post" action="/proposals/{{ proposal.proposal_id }}/reject">
+              <input type="hidden" name="redirect_to" value="/proposals/{{ proposal.proposal_id }}">
+              <div class="field">
+                <label for="reject-reason">Reject reason</label>
+                <textarea id="reject-reason" name="reason" placeholder="Explain why the proposal is being rejected"></textarea>
+              </div>
+              <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
+            </form>
+          </div>
+        </section>
+      {% elif proposal.status == "approved" %}
+        <section class="panel" style="box-shadow: none; margin-top: 1rem;">
+          <h3>Execution Action</h3>
+          <form method="post" action="/proposals/{{ proposal.proposal_id }}/execute">
+            <input type="hidden" name="redirect_to" value="/proposals/{{ proposal.proposal_id }}">
+            <button class="primary" type="submit">Execute</button>
+          </form>
+        </section>
+      {% endif %}
+
       <h3 style="margin-top: 1rem;">Action Payload</h3>
       <pre>{{ proposal.action_payload | pretty_json }}</pre>
 
@@ -69,4 +102,3 @@
     {% endif %}
   </section>
 {% endblock %}
-

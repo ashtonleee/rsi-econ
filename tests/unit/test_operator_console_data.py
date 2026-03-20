@@ -48,6 +48,7 @@ def test_console_settings_defaults(monkeypatch):
     assert settings.operator_token is None
     assert settings.workspace_dir == ROOT / "untrusted" / "agent_workspace"
     assert settings.trusted_state_dir == ROOT / "runtime" / "trusted_state"
+    assert settings.operator_runtime_dir == ROOT / "runtime" / "operator_console"
 
 
 @pytest.mark.fast
@@ -63,6 +64,7 @@ def test_console_settings_honor_relative_and_absolute_overrides(monkeypatch, tmp
     assert settings.operator_token == "token-1"
     assert settings.workspace_dir == ROOT / "tmp" / "workspace"
     assert settings.trusted_state_dir == tmp_path / "trusted"
+    assert settings.operator_runtime_dir == ROOT / "runtime" / "operator_console"
 
 
 @pytest.mark.fast
@@ -158,6 +160,62 @@ def test_bridge_api_http_error_raises_detail():
         asyncio.run(client.list_proposals())
 
     assert "forbidden" in str(exc.value)
+
+
+@pytest.mark.fast
+def test_bridge_api_can_decide_and_execute_proposals():
+    responses = [
+        httpx.Response(
+            200,
+            json={
+                "proposal_id": "proposal-1",
+                "action_type": "http_post",
+                "action_payload": {"url": "https://httpbin.org/post"},
+                "status": "approved",
+                "created_by": "agent",
+                "created_at": "2026-03-20T00:00:00+00:00",
+                "decided_by": "operator",
+                "decided_at": "2026-03-20T00:01:00+00:00",
+                "decision_reason": "ok",
+                "request_id": "req-1",
+                "trace_id": "trace-1",
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "proposal_id": "proposal-1",
+                "action_type": "http_post",
+                "action_payload": {"url": "https://httpbin.org/post"},
+                "status": "executed",
+                "created_by": "agent",
+                "created_at": "2026-03-20T00:00:00+00:00",
+                "decided_by": "operator",
+                "decided_at": "2026-03-20T00:01:00+00:00",
+                "decision_reason": "ok",
+                "executed_by": "operator",
+                "executed_at": "2026-03-20T00:02:00+00:00",
+                "execution_result": {"http_status": 200},
+                "request_id": "req-1",
+                "trace_id": "trace-1",
+            },
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return responses.pop(0)
+
+    client = BridgeAPI(
+        base_url="http://127.0.0.1:8000",
+        operator_token="token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    approved = asyncio.run(client.decide_proposal("proposal-1", decision="approve", reason="ok"))
+    executed = asyncio.run(client.execute_proposal("proposal-1"))
+
+    assert approved.status == "approved"
+    assert executed.status == "executed"
 
 
 @pytest.mark.fast

@@ -1,13 +1,15 @@
 from pathlib import Path
 import json
+from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from operator_console.bridge_api import BridgeAPI, BridgeAPIError, BridgeNotFoundError
 from operator_console.config import ConsoleSettings, console_settings
 from operator_console.data import RepoData
+from operator_console.launches import LaunchBusyError, LaunchManager, LaunchRequest
 
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -19,6 +21,7 @@ def create_app(
     settings: ConsoleSettings | None = None,
     bridge_api: BridgeAPI | None = None,
     repo_data: RepoData | None = None,
+    launch_manager: LaunchManager | None = None,
 ) -> FastAPI:
     settings = settings or console_settings()
     bridge_api = bridge_api or BridgeAPI(
@@ -26,11 +29,13 @@ def create_app(
         operator_token=settings.operator_token,
     )
     repo_data = repo_data or RepoData(settings)
+    launch_manager = launch_manager or LaunchManager(settings, repo_data=repo_data)
 
     app = FastAPI(title="RSI Operator Console")
     app.state.settings = settings
     app.state.bridge_api = bridge_api
     app.state.repo_data = repo_data
+    app.state.launch_manager = launch_manager
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.filters["pretty_json"] = lambda value: json.dumps(value, indent=2, sort_keys=True)
     templates.env.filters["tone"] = status_tone
@@ -49,6 +54,8 @@ def create_app(
             "workspace_dir": str(settings.workspace_dir),
             "trusted_state_dir": str(settings.trusted_state_dir),
             "proposal_statuses": PROPOSAL_STATUSES,
+            "flash_message": request.query_params.get("flash", ""),
+            "flash_level": request.query_params.get("flash_level", "ok"),
         }
         return templates.TemplateResponse(
             request=request,
@@ -62,6 +69,7 @@ def create_app(
         bridge_error = ""
         status = None
         latest_pending = None
+        active_launch = launch_manager.get_active_launch()
         try:
             status = await bridge_api.get_status()
             pending = await bridge_api.list_proposals(status="pending")
@@ -79,7 +87,74 @@ def create_app(
             bridge_error=bridge_error,
             latest_run=latest_run,
             latest_pending=latest_pending,
+            active_launch=active_launch,
             run_count=len(runs),
+        )
+
+    @app.get("/launches", response_class=HTMLResponse)
+    async def launches(request: Request) -> HTMLResponse:
+        return render_page(
+            request,
+            "launches.html",
+            page_title="Launches",
+            launch_plans=launch_manager.list_seed_plans(),
+            launches=launch_manager.list_launches(),
+            active_launch=launch_manager.get_active_launch(),
+        )
+
+    @app.post("/launches")
+    async def create_launch(request: Request) -> RedirectResponse:
+        form = await read_simple_form(request)
+        try:
+            launch_request = LaunchRequest(
+                task=form.get("task", "").strip(),
+                script=form.get("script", "").strip(),
+                launch_mode=form.get("launch_mode", "default").strip(),  # type: ignore[arg-type]
+                model=form.get("model", "").strip(),
+                input_url=form.get("input_url", "").strip(),
+                follow_target_url=form.get("follow_target_url", "").strip(),
+                proposal_target_url=form.get("proposal_target_url", "").strip(),
+                max_steps=max(1, int(form.get("max_steps", "8").strip() or "8")),
+            )
+            launch = launch_manager.create_launch(launch_request)
+        except (AssertionError, FileNotFoundError, LaunchBusyError, ValueError) as exc:
+            return redirect_with_flash("/launches", str(exc), level="error")
+
+        return redirect_with_flash(
+            f"/launches/{launch.launch_id}",
+            "Launch started.",
+            level="ok",
+        )
+
+    @app.get("/launches/{launch_id}", response_class=HTMLResponse)
+    async def launch_detail(request: Request, launch_id: str) -> HTMLResponse:
+        try:
+            snapshot = launch_manager.get_snapshot(launch_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="launch not found")
+        proposals, bridge_error = await load_snapshot_proposals(snapshot)
+        return render_page(
+            request,
+            "launch_detail.html",
+            page_title=f"Launch {launch_id}",
+            snapshot=snapshot,
+            related_proposals=proposals,
+            bridge_error=bridge_error,
+        )
+
+    @app.get("/api/launches/{launch_id}")
+    async def launch_snapshot(launch_id: str) -> JSONResponse:
+        try:
+            snapshot = launch_manager.get_snapshot(launch_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="launch not found")
+        proposals, bridge_error = await load_snapshot_proposals(snapshot)
+        return JSONResponse(
+            {
+                **snapshot,
+                "related_proposals": [proposal.model_dump() for proposal in proposals],
+                "bridge_error": bridge_error,
+            }
         )
 
     @app.get("/runs", response_class=HTMLResponse)
@@ -143,6 +218,30 @@ def create_app(
             status_code=status_code,
         )
 
+    @app.post("/proposals/{proposal_id}/approve")
+    async def approve_proposal(request: Request, proposal_id: str) -> RedirectResponse:
+        return await proposal_action_redirect(
+            request,
+            proposal_id,
+            action="approve",
+        )
+
+    @app.post("/proposals/{proposal_id}/reject")
+    async def reject_proposal(request: Request, proposal_id: str) -> RedirectResponse:
+        return await proposal_action_redirect(
+            request,
+            proposal_id,
+            action="reject",
+        )
+
+    @app.post("/proposals/{proposal_id}/execute")
+    async def execute_proposal(request: Request, proposal_id: str) -> RedirectResponse:
+        return await proposal_action_redirect(
+            request,
+            proposal_id,
+            action="execute",
+        )
+
     @app.get("/artifacts/{artifact_path:path}")
     async def artifact_view(request: Request, artifact_path: str):
         try:
@@ -167,11 +266,60 @@ def create_app(
     async def favicon() -> Response:
         return Response(status_code=204)
 
+    async def load_snapshot_proposals(snapshot: dict) -> tuple[list, str]:
+        proposal_ids = snapshot.get("proposal_ids", [])
+        if not proposal_ids:
+            return [], ""
+
+        proposals = []
+        try:
+            for proposal_id in proposal_ids:
+                proposals.append(await bridge_api.get_proposal(str(proposal_id)))
+        except BridgeAPIError as exc:
+            return [], str(exc)
+        return proposals, ""
+
+    async def proposal_action_redirect(
+        request: Request,
+        proposal_id: str,
+        *,
+        action: str,
+    ) -> RedirectResponse:
+        form = await read_simple_form(request)
+        redirect_to = form.get("redirect_to", "").strip() or f"/proposals/{proposal_id}"
+        reason = form.get("reason", "").strip()
+        try:
+            if action == "execute":
+                await bridge_api.execute_proposal(proposal_id)
+                message = "Proposal executed."
+            else:
+                decision = "approve" if action == "approve" else "reject"
+                await bridge_api.decide_proposal(proposal_id, decision=decision, reason=reason)
+                message = f"Proposal {decision}d."
+        except BridgeAPIError as exc:
+            return redirect_with_flash(redirect_to, str(exc), level="error")
+        return redirect_with_flash(redirect_to, message, level="ok")
+
     return app
 
 
 def status_tone(reachable: bool) -> str:
     return "ok" if reachable else "bad"
+
+
+async def read_simple_form(request: Request) -> dict[str, str]:
+    payload = (await request.body()).decode("utf-8")
+    parsed = parse_qs(payload, keep_blank_values=True)
+    return {
+        key: values[-1] if values else ""
+        for key, values in parsed.items()
+    }
+
+
+def redirect_with_flash(path: str, message: str, *, level: str) -> RedirectResponse:
+    query = urlencode({"flash": message, "flash_level": level})
+    separator = "&" if "?" in path else "?"
+    return RedirectResponse(url=f"{path}{separator}{query}", status_code=303)
 
 
 app = create_app()
