@@ -3,6 +3,7 @@ import pytest
 from shared.schemas import BrowserFollowLink
 from trusted.fetcher.app import build_policy as build_fetch_policy
 from trusted.web.policy import (
+    WebPolicy,
     WebPolicyError,
     normalize_web_target,
     normalize_web_redirect_target,
@@ -40,6 +41,25 @@ def test_shared_policy_blocks_hosts_redirects_and_private_ips():
 
     with pytest.raises(WebPolicyError, match="blocked_hostname"):
         normalize_web_target("http://localhost/secret", policy)
+
+
+def test_public_workflow_policy_allows_public_hosts_but_still_blocks_private_targets():
+    policy = WebPolicy(
+        allowlist_hosts=("allowed.test",),
+        private_test_hosts=(),
+        max_redirects=3,
+        timeout_seconds=5.0,
+        allow_public_hosts=True,
+    )
+
+    target = normalize_web_target("https://public.example/workflow", policy)
+    assert target.host == "public.example"
+
+    with pytest.raises(WebPolicyError, match="blocked_hostname"):
+        normalize_web_target("http://localhost/internal", policy)
+
+    with pytest.raises(WebPolicyError, match="unsupported_scheme"):
+        normalize_web_target("javascript:alert(1)", policy)
 
 
 def test_browser_policy_denies_popup_download_and_local_file():

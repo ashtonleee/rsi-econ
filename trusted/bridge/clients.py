@@ -3,12 +3,25 @@ import httpx
 from shared.schemas import (
     BrowserFollowHrefInternalResponse,
     BrowserFollowHrefRequest,
+    BrowserHttpRequestExecuteInternalResponse,
+    BrowserHttpRequestExecuteRequest,
+    BrowserSessionActionInternalResponse,
+    BrowserSessionBackRequest,
     BrowserSessionClickRequest,
+    BrowserSessionCloseTabRequest,
+    BrowserSessionFillRequest,
+    BrowserSessionForwardRequest,
+    BrowserSessionHoverRequest,
+    BrowserSessionNavigateRequest,
+    BrowserSessionNewTabRequest,
     BrowserSessionOpenRequest,
+    BrowserSessionPressRequest,
     BrowserSessionSelectRequest,
     BrowserSessionSetCheckedRequest,
     BrowserSessionSnapshotInternalResponse,
+    BrowserSessionSwitchTabRequest,
     BrowserSessionTypeRequest,
+    BrowserSessionWaitForRequest,
     BrowserSubmitExecuteInternalResponse,
     BrowserSubmitExecuteRequest,
     BrowserSubmitPreviewInternalResponse,
@@ -190,6 +203,175 @@ class TrustedBridgeClients:
             response.raise_for_status()
         return BrowserSessionSnapshotInternalResponse.model_validate(response.json())
 
+    async def browser_session_navigate(
+        self,
+        session_id: str,
+        payload: BrowserSessionNavigateRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/navigate",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_click_action(
+        self,
+        session_id: str,
+        payload: BrowserSessionClickRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/actions/click",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_fill(
+        self,
+        session_id: str,
+        payload: BrowserSessionFillRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/fill",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_select_action(
+        self,
+        session_id: str,
+        payload: BrowserSessionSelectRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/actions/select",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_set_checked_action(
+        self,
+        session_id: str,
+        payload: BrowserSessionSetCheckedRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/actions/set-checked",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_press(
+        self,
+        session_id: str,
+        payload: BrowserSessionPressRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/press",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_hover(
+        self,
+        session_id: str,
+        payload: BrowserSessionHoverRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/hover",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_wait_for(
+        self,
+        session_id: str,
+        payload: BrowserSessionWaitForRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/wait-for",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_back(
+        self,
+        session_id: str,
+        payload: BrowserSessionBackRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/back",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_forward(
+        self,
+        session_id: str,
+        payload: BrowserSessionForwardRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/forward",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_new_tab(
+        self,
+        session_id: str,
+        payload: BrowserSessionNewTabRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/tabs/new",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_switch_tab(
+        self,
+        session_id: str,
+        payload: BrowserSessionSwitchTabRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/tabs/switch",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
+    async def browser_session_close_tab(
+        self,
+        session_id: str,
+        payload: BrowserSessionCloseTabRequest,
+    ) -> BrowserSessionActionInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/tabs/close",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserSessionActionInternalResponse.model_validate(response.json())
+
     async def browser_prepare_submit(
         self,
         session_id: str,
@@ -215,6 +397,19 @@ class TrustedBridgeClients:
             )
             response.raise_for_status()
         return BrowserSubmitExecuteInternalResponse.model_validate(response.json())
+
+    async def browser_execute_http_request(
+        self,
+        session_id: str,
+        payload: BrowserHttpRequestExecuteRequest,
+    ) -> BrowserHttpRequestExecuteInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/internal/sessions/{session_id}/execute-http-request",
+                json=payload.model_dump(),
+            )
+            response.raise_for_status()
+        return BrowserHttpRequestExecuteInternalResponse.model_validate(response.json())
 
     async def egress_fetch(self, payload: EgressFetchRequest) -> EgressFetchResponse:
         """Call egress /internal/fetch directly (used for consequential actions)."""

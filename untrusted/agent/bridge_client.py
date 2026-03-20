@@ -11,12 +11,23 @@ from shared.schemas import (
     AgentRunEventRequest,
     BrowserFollowHrefRequest,
     BrowserFollowHrefResponse,
+    BrowserSessionActionResponse,
+    BrowserSessionBackRequest,
     BrowserSessionClickRequest,
+    BrowserSessionCloseTabRequest,
+    BrowserSessionFillRequest,
+    BrowserSessionForwardRequest,
+    BrowserSessionHoverRequest,
+    BrowserSessionNavigateRequest,
+    BrowserSessionNewTabRequest,
     BrowserSessionOpenRequest,
+    BrowserSessionPressRequest,
     BrowserSessionSelectRequest,
     BrowserSessionSetCheckedRequest,
     BrowserSessionSnapshotResponse,
+    BrowserSessionSwitchTabRequest,
     BrowserSessionTypeRequest,
+    BrowserSessionWaitForRequest,
     BrowserSubmitProposalRequest,
     BrowserRenderRequest,
     BrowserRenderResponse,
@@ -103,8 +114,13 @@ class BridgeClient:
             response.raise_for_status()
         return BrowserFollowHrefResponse.model_validate(response.json())
 
-    async def browser_session_open(self, *, url: str) -> BrowserSessionSnapshotResponse:
-        payload = BrowserSessionOpenRequest(url=url)
+    async def browser_session_open(
+        self,
+        *,
+        url: str,
+        capability_profile: str = "bounded_packet",
+    ) -> BrowserSessionSnapshotResponse:
+        payload = BrowserSessionOpenRequest(url=url, capability_profile=capability_profile)
         async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
             response = await client.post(
                 "/web/browser/sessions/open",
@@ -205,6 +221,229 @@ class BridgeClient:
             )
             response.raise_for_status()
         return BrowserSessionSnapshotResponse.model_validate(response.json())
+
+    async def browser_session_navigate(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        url: str,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionNavigateRequest(snapshot_id=snapshot_id, url=url)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/navigate",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_click_action(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionClickRequest(snapshot_id=snapshot_id, element_id=element_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/actions/click",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_fill(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        text: str,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionFillRequest(snapshot_id=snapshot_id, element_id=element_id, text=text)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/fill",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_select_action(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        value: str,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionSelectRequest(snapshot_id=snapshot_id, element_id=element_id, value=value)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/actions/select",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_set_checked_action(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        checked: bool,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionSetCheckedRequest(snapshot_id=snapshot_id, element_id=element_id, checked=checked)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/actions/set_checked",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_press(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        key: str,
+        element_id: str = "",
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionPressRequest(snapshot_id=snapshot_id, key=key, element_id=element_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/press",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_hover(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionHoverRequest(snapshot_id=snapshot_id, element_id=element_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/hover",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_wait_for(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str = "",
+        text: str = "",
+        time_seconds: float = 0.0,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionWaitForRequest(snapshot_id=snapshot_id, text=text, time_seconds=time_seconds)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/wait_for",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_back(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str = "",
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionBackRequest(snapshot_id=snapshot_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/back",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_forward(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str = "",
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionForwardRequest(snapshot_id=snapshot_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/forward",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_new_tab(
+        self,
+        *,
+        session_id: str,
+        url: str = "",
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionNewTabRequest(url=url)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/tabs/new",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_switch_tab(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        tab_id: str,
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionSwitchTabRequest(snapshot_id=snapshot_id, tab_id=tab_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/tabs/switch",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
+
+    async def browser_session_close_tab(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str = "",
+        tab_id: str = "",
+    ) -> BrowserSessionActionResponse:
+        payload = BrowserSessionCloseTabRequest(snapshot_id=snapshot_id, tab_id=tab_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/tabs/close",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionActionResponse.model_validate(response.json())
 
     async def browser_submit_proposal(
         self,

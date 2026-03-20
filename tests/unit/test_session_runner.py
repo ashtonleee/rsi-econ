@@ -6,7 +6,9 @@ import pytest
 from shared.schemas import (
     AgentRunEventReceipt,
     BrowserInteractable,
+    BrowserHttpRequestPreview,
     BrowserRenderResponse,
+    BrowserSessionActionResponse,
     BrowserSessionSnapshotResponse,
     BrowserState,
     BridgeStatusReport,
@@ -147,12 +149,18 @@ class FakeBridgeClient:
             trace_id="trace-proposal",
         )
 
-    async def browser_session_open(self, *, url: str) -> BrowserSessionSnapshotResponse:
+    async def browser_session_open(
+        self,
+        *,
+        url: str,
+        capability_profile: str = "bounded_packet",
+    ) -> BrowserSessionSnapshotResponse:
         snapshot = BrowserSessionSnapshotResponse(
             request_id="browser-session-open",
             trace_id="trace-browser-session-open",
             session_id="browser-session-1",
             snapshot_id="snapshot-1",
+            capability_profile=capability_profile,
             current_url=url,
             http_status=200,
             page_title="Interactive form fixture",
@@ -220,6 +228,148 @@ class FakeBridgeClient:
         )
         self.browser_session_snapshots[session_id] = snapshot
         return snapshot
+
+    async def browser_session_navigate(self, *, session_id: str, snapshot_id: str, url: str) -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id].model_copy(update={"snapshot_id": "snapshot-nav", "current_url": url})
+        self.browser_session_snapshots[session_id] = snapshot
+        return BrowserSessionActionResponse(
+            request_id="browser-action-1",
+            trace_id="trace-browser-action-1",
+            outcome="snapshot",
+            snapshot=snapshot,
+            proposal_preview=None,
+            proposal=None,
+        )
+
+    async def browser_session_click_action(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+    ) -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        if element_id == "el_002":
+            preview = BrowserHttpRequestPreview(
+                request_id="paused-request-1",
+                session_id=session_id,
+                snapshot_id=snapshot.snapshot_id,
+                tab_id="tab_001",
+                current_url=snapshot.current_url,
+                target_url="https://public.example/form-submit",
+                method="POST",
+                header_preview={"content-type": "application/x-www-form-urlencoded"},
+                body_preview="name=alice",
+                body_sha256="body-sha",
+                body_bytes=10,
+                trigger_action="click",
+                trigger_element_id=element_id,
+            )
+            proposal = ProposalRecord(
+                proposal_id="browser-http-request-1",
+                action_type="browser_http_request",
+                action_payload={
+                    "request_id": preview.request_id,
+                    "session_id": session_id,
+                    "snapshot_id": snapshot.snapshot_id,
+                    "tab_id": preview.tab_id,
+                    "current_url": preview.current_url,
+                    "target_url": preview.target_url,
+                    "method": preview.method,
+                    "header_preview": preview.header_preview,
+                    "body_preview": preview.body_preview,
+                    "body_sha256": preview.body_sha256,
+                    "body_bytes": preview.body_bytes,
+                    "trigger_action": preview.trigger_action,
+                    "trigger_element_id": preview.trigger_element_id,
+                },
+                status="pending",
+                created_by="agent",
+                created_at="2026-03-20T00:00:02+00:00",
+                request_id="req-browser-http-proposal",
+                trace_id="trace-browser-http-proposal",
+            )
+            return BrowserSessionActionResponse(
+                request_id="browser-action-2",
+                trace_id="trace-browser-action-2",
+                outcome="proposal_required",
+                snapshot=snapshot,
+                proposal_preview=preview,
+                proposal=proposal,
+            )
+        return BrowserSessionActionResponse(
+            request_id="browser-action-3",
+            trace_id="trace-browser-action-3",
+            outcome="snapshot",
+            snapshot=snapshot,
+            proposal_preview=None,
+            proposal=None,
+        )
+
+    async def browser_session_fill(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        text: str,
+    ) -> BrowserSessionActionResponse:
+        snapshot = await self.browser_session_type(
+            session_id=session_id,
+            snapshot_id=snapshot_id,
+            element_id=element_id,
+            text=text,
+        )
+        return BrowserSessionActionResponse(
+            request_id="browser-action-fill",
+            trace_id="trace-browser-action-fill",
+            outcome="snapshot",
+            snapshot=snapshot,
+            proposal_preview=None,
+            proposal=None,
+        )
+
+    async def browser_session_select_action(self, *, session_id: str, snapshot_id: str, element_id: str, value: str) -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-select", trace_id="trace-browser-action-select", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_set_checked_action(self, *, session_id: str, snapshot_id: str, element_id: str, checked: bool) -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-check", trace_id="trace-browser-action-check", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_press(self, *, session_id: str, snapshot_id: str, key: str, element_id: str = "") -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-press", trace_id="trace-browser-action-press", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_hover(self, *, session_id: str, snapshot_id: str, element_id: str) -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-hover", trace_id="trace-browser-action-hover", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_wait_for(self, *, session_id: str, snapshot_id: str = "", text: str = "", time_seconds: float = 0.0) -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-wait", trace_id="trace-browser-action-wait", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_back(self, *, session_id: str, snapshot_id: str = "") -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-back", trace_id="trace-browser-action-back", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_forward(self, *, session_id: str, snapshot_id: str = "") -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-forward", trace_id="trace-browser-action-forward", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_new_tab(self, *, session_id: str, url: str = "") -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id].model_copy(update={"active_tab_id": "tab_002", "tabs": [{"tab_id": "tab_001", "current_url": "https://httpbin.org/forms/post", "page_title": "Interactive form fixture"}, {"tab_id": "tab_002", "current_url": url or "about:blank", "page_title": "New tab"}]})
+        self.browser_session_snapshots[session_id] = snapshot
+        return BrowserSessionActionResponse(request_id="browser-action-new-tab", trace_id="trace-browser-action-new-tab", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_switch_tab(self, *, session_id: str, snapshot_id: str, tab_id: str) -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id].model_copy(update={"active_tab_id": tab_id})
+        self.browser_session_snapshots[session_id] = snapshot
+        return BrowserSessionActionResponse(request_id="browser-action-switch-tab", trace_id="trace-browser-action-switch-tab", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
+
+    async def browser_session_close_tab(self, *, session_id: str, snapshot_id: str = "", tab_id: str = "") -> BrowserSessionActionResponse:
+        snapshot = self.browser_session_snapshots[session_id]
+        return BrowserSessionActionResponse(request_id="browser-action-close-tab", trace_id="trace-browser-action-close-tab", outcome="snapshot", snapshot=snapshot, proposal_preview=None, proposal=None)
 
     async def browser_session_select(
         self,
@@ -450,6 +600,25 @@ async def test_session_runner_fails_when_model_requests_disallowed_tool(tmp_path
 
 @pytest.mark.fast
 @pytest.mark.anyio("asyncio")
+async def test_session_runner_surfaces_provider_passthrough_hint_for_mock_plain_text(tmp_path: Path):
+    bridge = FakeBridgeClient(["stage1 deterministic reply: plain text mock output"])
+    runner = make_runner(tmp_path, bridge_client=bridge)
+
+    result = await runner.run_session(
+        session_id="session-plain-text",
+        task="Read one page.",
+    )
+    state = json.loads(
+        (tmp_path / "agent_workspace" / "sessions" / "session-plain-text" / "state.json").read_text(encoding="utf-8")
+    )
+
+    assert result.stop_reason == "failed"
+    assert state["status"] == "failed"
+    assert "provider_passthrough" in state["error"]
+
+
+@pytest.mark.fast
+@pytest.mark.anyio("asyncio")
 async def test_session_runner_writes_packet_screenshot_artifact(tmp_path: Path):
     bridge = FakeBridgeClient(
         [
@@ -535,3 +704,58 @@ async def test_session_runner_can_open_type_and_pause_for_browser_submit(tmp_pat
     assert state["browser_session"]["session_id"] == "browser-session-1"
     assert state["last_proposal"]["action_type"] == "browser_submit"
     assert state["last_proposal"]["action_payload"]["target_url"] == "https://httpbin.org/post"
+
+
+@pytest.mark.fast
+@pytest.mark.anyio("asyncio")
+async def test_session_runner_public_workflow_click_pauses_for_browser_http_request(tmp_path: Path):
+    bridge = FakeBridgeClient(
+        [
+            json.dumps(
+                {
+                    "tool": "bridge_browser_session_open",
+                    "reason": "Open the public workflow page first.",
+                    "params": {"url": "https://public.example/workflow"},
+                }
+            ),
+            json.dumps(
+                {
+                    "tool": "bridge_browser_session_fill",
+                    "reason": "Fill the visible name field.",
+                    "params": {
+                        "session_id": "browser-session-1",
+                        "snapshot_id": "snapshot-1",
+                        "element_id": "el_001",
+                        "text": "alice",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "tool": "bridge_browser_session_click",
+                    "reason": "Click the real submit button and let the trusted browser pause the request.",
+                    "params": {
+                        "session_id": "browser-session-1",
+                        "snapshot_id": "snapshot-2",
+                        "element_id": "el_002",
+                    },
+                }
+            ),
+        ]
+    )
+    runner = make_runner(tmp_path, bridge_client=bridge)
+
+    result = await runner.run_session(
+        session_id="public-workflow-session",
+        task="Fill the public workflow form and pause on the real request.",
+        input_url="https://public.example/workflow",
+        capability_profile="workflow_browser_public",
+    )
+    state = json.loads((tmp_path / "agent_workspace" / "sessions" / "public-workflow-session" / "state.json").read_text(encoding="utf-8"))
+
+    assert result.stop_reason == "waiting_for_approval"
+    assert state["status"] == "waiting_for_approval"
+    assert state["capability_profile"] == "workflow_browser_public"
+    assert state["last_proposal"]["action_type"] == "browser_http_request"
+    assert state["last_proposal"]["action_payload"]["target_url"] == "https://public.example/form-submit"
+    assert state["browser_session"]["pending_request_preview"]["request_id"] == "paused-request-1"

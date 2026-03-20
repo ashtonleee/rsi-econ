@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 import ipaddress
 import socket
 import ssl
@@ -139,8 +140,9 @@ def _error_detail(
     }
 
 
-CHANNELS_ALLOWING_POST = {"consequential_action"}
-ALLOWED_METHODS = {"GET", "POST"}
+CHANNELS_ALLOWING_MUTATION = {"consequential_action"}
+CHANNELS_ALLOWING_POST = CHANNELS_ALLOWING_MUTATION
+ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
 
 async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
@@ -150,7 +152,7 @@ async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
             status_code=405,
             detail={"reason": "method_not_allowed", "detail": f"unsupported method: {method}"},
         )
-    if method != "GET" and payload.channel not in CHANNELS_ALLOWING_POST:
+    if method != "GET" and payload.channel not in CHANNELS_ALLOWING_MUTATION:
         raise HTTPException(
             status_code=405,
             detail={
@@ -160,6 +162,8 @@ async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
         )
 
     policy = app.state.policy
+    if payload.allow_public_hosts:
+        policy = replace(policy, allow_public_hosts=True)
     settings = app.state.settings
     approved: ApprovedEgressTarget | None = None
     try:
@@ -191,9 +195,9 @@ async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
     headers.setdefault("User-Agent", settings.user_agent)
     headers.setdefault("Accept-Encoding", "identity")
 
-    # Prepare request body for POST
+    # Prepare request body for mutating requests
     request_body: bytes | None = None
-    if method == "POST":
+    if method != "GET":
         if payload.request_body_base64:
             request_body = base64.b64decode(payload.request_body_base64)
         else:
@@ -227,7 +231,7 @@ async def execute_fetch(payload: EgressFetchRequest) -> EgressFetchResponse:
                         "allow_redirects": False,
                         "timeout": aiohttp.ClientTimeout(total=policy.timeout_seconds),
                     }
-                    if method == "POST" and request_body is not None:
+                    if method != "GET" and request_body is not None:
                         request_kwargs["data"] = request_body
                     async with session.request(
                         method,

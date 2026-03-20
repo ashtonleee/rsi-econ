@@ -1,19 +1,26 @@
 {% extends "base.html" %}
 {% block content %}
   {% set session = snapshot.session %}
+  {% set proposal = snapshot.proposal %}
+  {% set proposal_payload = proposal.action_payload if proposal and proposal.action_payload else {} %}
   <section class="workspace-top">
-    <article class="panel preview-stage">
+    <article class="panel preview-stage" id="session-result-panel">
       <div class="hero">
         <div>
-          <h2 style="margin-bottom: 0.35rem;">Session Workspace</h2>
-          <div class="muted">Live transcript and browser packet view for the persistent session loop.</div>
+          <h2 style="margin-bottom: 0.35rem;">Results</h2>
+          <div class="muted">{{ snapshot.boundary_note }}</div>
         </div>
         <div class="inline-actions">
           <span class="pill {{ snapshot.phase_tone }}">{{ snapshot.phase_label.replace("_", " ") }}</span>
-          {% if snapshot.summary_url %}
-            <a class="button" href="{{ snapshot.summary_url }}">Open Session Summary</a>
+          {% if snapshot.result.link_url %}
+            <a class="button" href="{{ snapshot.result.link_url }}">{{ snapshot.result.link_label }}</a>
           {% endif %}
         </div>
+      </div>
+
+      <div class="callout {% if snapshot.result.title == 'No result yet' %}{% if snapshot.phase_tone == 'bad' %}error{% endif %}{% endif %}" style="margin-bottom: 1rem;">
+        <strong>{{ snapshot.result.title }}</strong>
+        <div>{{ snapshot.result.body }}</div>
       </div>
 
       <div id="session-preview-panel">
@@ -22,11 +29,11 @@
             <img class="preview preview-stage-image" src="{{ snapshot.current_screenshot.url }}" alt="{{ snapshot.current_screenshot.name }}">
           </a>
           <div class="preview-caption">
-            <strong>Current packet preview</strong>
+            <strong>Current browser view</strong>
             <div class="muted">{{ snapshot.current_screenshot.name }}</div>
           </div>
         {% else %}
-          <div class="empty preview-empty">No browser screenshot has been written for this session yet.</div>
+          <div class="empty preview-empty">No browser view has been saved for this session yet.</div>
         {% endif %}
       </div>
     </article>
@@ -34,14 +41,14 @@
     <article class="panel status-stage" id="session-status-panel">
       <div class="status-hero">
         <div>
-          <div class="eyebrow">Current phase</div>
+          <div class="eyebrow">Actions</div>
           <h2 style="margin-bottom: 0.4rem;">{{ snapshot.headline }}</h2>
         </div>
         <span class="pill {{ snapshot.phase_tone }}">{{ session.status }}</span>
       </div>
 
       <div class="callout {% if snapshot.phase_tone == 'bad' %}error{% endif %}" style="margin-bottom: 1rem;">
-        <strong>Next action</strong>
+        <strong>What you do next</strong>
         <div>{{ snapshot.next_action }}</div>
       </div>
 
@@ -57,6 +64,10 @@
         <div class="meta-row">
           <dt>Mode</dt>
           <dd>{{ session.launch_mode }}{% if session.model %} / <code>{{ session.model }}</code>{% endif %}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Browser capability</dt>
+          <dd><code>{{ session.capability_profile or "bounded_packet" }}</code></dd>
         </div>
         <div class="meta-row">
           <dt>Input URL</dt>
@@ -96,21 +107,40 @@
   </section>
 
   <section class="panel approval-banner" id="session-approval-banner">
-    {% set proposal = session.last_proposal_id %}
-    {% set proposal_payload = snapshot.workspace_state.last_proposal.action_payload if snapshot.workspace_state.last_proposal else {} %}
-    {% if proposal %}
+    {% if proposal.proposal_id %}
       <div class="approval-banner-head">
         <div>
-          <div class="eyebrow">Approval state</div>
-          <h3 style="margin-bottom: 0.35rem;">Proposal <code>{{ proposal }}</code></h3>
+          <div class="eyebrow">Actions</div>
+          <h3 style="margin-bottom: 0.35rem;">Proposal <code>{{ proposal.proposal_id }}</code></h3>
+          <div class="muted">
+            {% if proposal.status == "pending" %}
+              Needs action
+            {% elif proposal.status == "approved" %}
+              Approved, ready to execute
+            {% elif proposal.status == "executed" %}
+              Executed
+            {% elif proposal.status == "rejected" %}
+              Rejected
+            {% else %}
+              {{ proposal.status or "No proposal status" }}
+            {% endif %}
+          </div>
         </div>
-        <span class="pill {% if snapshot.phase_label == 'waiting_for_approval' %}warn{% else %}ok{% endif %}">{{ snapshot.phase_label.replace("_", " ") }}</span>
+        <span class="pill {% if proposal.status in ['pending', 'approved'] %}warn{% elif proposal.status == 'executed' %}ok{% elif proposal.status == 'rejected' %}bad{% else %}ok{% endif %}">
+          {{ proposal.status or "unknown" }}
+        </span>
       </div>
       {% if proposal_payload.target_url %}
         <div class="callout" style="margin-bottom: 1rem;">
-          <strong>{{ snapshot.workspace_state.last_proposal.action_type }}</strong>
+          <strong>{{ proposal.action_type }}</strong>
           <div>Target: <code>{{ proposal_payload.target_url }}</code></div>
           <div>Method: {{ proposal_payload.method or "POST" }}</div>
+          {% if proposal.action_type == "browser_http_request" and proposal_payload.body_preview %}
+            <details style="margin-top: 0.75rem;">
+              <summary>Request preview</summary>
+              <pre>{{ {"headers": proposal_payload.header_preview, "body_preview": proposal_payload.body_preview, "body_sha256": proposal_payload.body_sha256, "body_bytes": proposal_payload.body_bytes} | pretty_json }}</pre>
+            </details>
+          {% endif %}
           {% if proposal_payload.field_preview %}
             <details style="margin-top: 0.75rem;">
               <summary>Field preview</summary>
@@ -119,41 +149,59 @@
           {% endif %}
         </div>
       {% endif %}
-      {% if session.status == "waiting_for_approval" %}
+      {% if proposal.status == "pending" %}
+        <div class="callout" style="margin-bottom: 1rem;">
+          <strong>Needs Action</strong>
+          <div>This proposal is waiting for an operator decision. Approve or reject it here.</div>
+        </div>
         <div class="grid two">
-          <form method="post" action="/proposals/{{ proposal }}/approve">
+          <form method="post" action="/proposals/{{ proposal.proposal_id }}/approve">
             <input type="hidden" name="redirect_to" value="/sessions/{{ session.session_id }}">
             <div class="field">
-              <label for="approve-{{ proposal }}">Approve reason</label>
-              <textarea id="approve-{{ proposal }}" name="reason">approved from session workspace</textarea>
+              <label for="approve-{{ proposal.proposal_id }}">Approve reason</label>
+              <textarea id="approve-{{ proposal.proposal_id }}" name="reason">approved from session workspace</textarea>
             </div>
             <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
           </form>
-          <form method="post" action="/proposals/{{ proposal }}/reject">
+          <form method="post" action="/proposals/{{ proposal.proposal_id }}/reject">
             <input type="hidden" name="redirect_to" value="/sessions/{{ session.session_id }}">
             <div class="field">
-              <label for="reject-{{ proposal }}">Reject reason</label>
-              <textarea id="reject-{{ proposal }}" name="reason"></textarea>
+              <label for="reject-{{ proposal.proposal_id }}">Reject reason</label>
+              <textarea id="reject-{{ proposal.proposal_id }}" name="reason"></textarea>
             </div>
             <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
           </form>
         </div>
-      {% else %}
-        <form method="post" action="/proposals/{{ proposal }}/execute">
+      {% elif proposal.status == "approved" %}
+        <div class="callout" style="margin-bottom: 1rem;">
+          <strong>Approved, ready to execute</strong>
+          <div>The approval has already been recorded. Execute when you want the action to run and the session to continue.</div>
+        </div>
+        <form method="post" action="/proposals/{{ proposal.proposal_id }}/execute">
           <input type="hidden" name="redirect_to" value="/sessions/{{ session.session_id }}">
           <button class="primary" type="submit">Execute</button>
         </form>
+      {% elif proposal.status == "executed" %}
+        <div class="callout" style="margin-bottom: 1rem;">
+          <strong>Executed</strong>
+          <div>This proposal already ran. Review the result above, artifacts below, and transcript for follow-up steps.</div>
+        </div>
+      {% elif proposal.status == "rejected" %}
+        <div class="callout error" style="margin-bottom: 1rem;">
+          <strong>Rejected</strong>
+          <div>This proposal was rejected. Review the transcript to decide whether to restart or change the task.</div>
+        </div>
       {% endif %}
     {% else %}
-      <div class="empty">No proposal is attached to this session right now.</div>
+      <div class="empty">No operator action is waiting right now.</div>
     {% endif %}
   </section>
 
   <section class="panel" id="session-browser-panel">
     <div class="hero">
       <div>
-        <h2 style="margin-bottom: 0.35rem;">Interactive Browser</h2>
-        <div class="muted">Current trusted browser session URL, page packet, and interactable elements.</div>
+        <h2 style="margin-bottom: 0.35rem;">Actions: Interactive Browser</h2>
+        <div class="muted">Trusted browser state for this session, including tabs, request gates, and visible interactable elements.</div>
       </div>
     </div>
     {% if snapshot.browser_session.session_id %}
@@ -162,6 +210,34 @@
         <div><code>{{ snapshot.browser_session.session_id }}</code></div>
         <div class="muted">{{ snapshot.browser_session.current_url or "No current URL yet." }}</div>
       </div>
+      {% if snapshot.browser_session.tabs %}
+        <div class="artifact-list" style="margin-bottom: 1rem;">
+          {% for tab in snapshot.browser_session.tabs %}
+            <div class="artifact-card">
+              <div>
+                <strong><code>{{ tab.tab_id }}</code></strong>
+                <div class="muted">{{ "active tab" if tab.tab_id == snapshot.browser_session.active_tab_id else "background tab" }}</div>
+              </div>
+              <div>
+                <div>{{ tab.page_title or "Untitled tab" }}</div>
+                <div class="muted">{{ tab.current_url or "about:blank" }}</div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if snapshot.browser_session.pending_request_preview %}
+        <div class="callout" style="margin-bottom: 1rem;">
+          <strong>Real browser request paused for approval</strong>
+          <div>{{ snapshot.browser_session.pending_request_preview.method }} <code>{{ snapshot.browser_session.pending_request_preview.target_url }}</code></div>
+          {% if snapshot.browser_session.pending_request_preview.body_preview %}
+            <details style="margin-top: 0.75rem;">
+              <summary>Raw request preview</summary>
+              <pre>{{ snapshot.browser_session.pending_request_preview | pretty_json }}</pre>
+            </details>
+          {% endif %}
+        </div>
+      {% endif %}
       {% if snapshot.browser_session.interactable_elements %}
         <div class="artifact-list">
           {% for item in snapshot.browser_session.interactable_elements %}
@@ -172,6 +248,9 @@
               </div>
               <div>
                 <div>{{ item.label or item.text or item.name or "Unlabeled element" }}</div>
+                {% if item.actions %}
+                  <div class="muted">{{ item.actions|join(", ") }}</div>
+                {% endif %}
                 {% if item.value_preview %}
                   <div class="muted">{{ item.value_preview }}</div>
                 {% endif %}
@@ -180,7 +259,7 @@
           {% endfor %}
         </div>
       {% else %}
-        <div class="empty">No interactable elements were captured in the current browser packet yet.</div>
+        <div class="empty">No interactable elements were captured in the current browser view yet.</div>
       {% endif %}
     {% else %}
       <div class="empty">No interactive browser session is open for this run yet.</div>
@@ -192,7 +271,7 @@
       <div class="hero">
         <div>
           <h2 style="margin-bottom: 0.35rem;">Transcript</h2>
-          <div class="muted">Plain-English summary first. Technical details stay immediately available.</div>
+          <div class="muted">Observable model inputs, tool choices, and tool results. Hidden reasoning is not shown.</div>
         </div>
       </div>
       <div class="timeline" id="session-transcript">
@@ -212,19 +291,19 @@
                 </div>
               </div>
               <details>
-                <summary>Technical details</summary>
+                <summary>Raw observable payload</summary>
                 <pre>{{ item | pretty_json }}</pre>
               </details>
             </article>
           {% endfor %}
         {% else %}
-          <div class="empty">The transcript will appear after the first model decision lands.</div>
+          <div class="empty">The transcript will appear after the first visible model step lands.</div>
         {% endif %}
       </div>
     </article>
 
     <article class="panel">
-      <h2>Artifacts And Logs</h2>
+      <h2>Results And Logs</h2>
       <div class="artifact-list" id="session-artifacts">
         {% if snapshot.related_artifacts %}
           {% for artifact in snapshot.related_artifacts %}
@@ -240,7 +319,7 @@
             </a>
           {% endfor %}
         {% else %}
-          <div class="empty">No session artifacts have been written yet.</div>
+          <div class="empty">No session results or artifacts have been written yet.</div>
         {% endif %}
       </div>
       <h3 style="margin-top: 1rem;">Session Log Tail</h3>
@@ -258,6 +337,7 @@
   <script>
     (() => {
       const sessionId = {{ session.session_id | tojson }};
+      const resultPanel = document.getElementById("session-result-panel");
       const previewPanel = document.getElementById("session-preview-panel");
       const transcriptPanel = document.getElementById("session-transcript");
       const statusPanel = document.getElementById("session-status-panel");
@@ -283,40 +363,163 @@
         return escapeHtml(JSON.stringify(value ?? {}, null, 2));
       }
 
-      function renderSnapshot(snapshot) {
-        const proposal = (snapshot.workspace_state || {}).last_proposal || {};
-        const proposalPayload = proposal.action_payload || {};
+      function proposalTone(status) {
+        if (status === "executed") return "ok";
+        if (status === "rejected") return "bad";
+        if (status === "pending" || status === "approved") return "warn";
+        return "ok";
+      }
 
+      function proposalStateLabel(status) {
+        if (status === "pending") return "Needs action";
+        if (status === "approved") return "Approved, ready to execute";
+        if (status === "executed") return "Executed";
+        if (status === "rejected") return "Rejected";
+        return status || "No proposal status";
+      }
+
+      function renderResult(snapshot) {
+        const result = snapshot.result || {};
+        resultPanel.innerHTML = `
+          <div class="hero">
+            <div>
+              <h2 style="margin-bottom: 0.35rem;">Results</h2>
+              <div class="muted">${escapeHtml(snapshot.boundary_note || "")}</div>
+            </div>
+            <div class="inline-actions">
+              <span class="pill ${escapeHtml(snapshot.phase_tone)}">${escapeHtml((snapshot.phase_label || "").replaceAll("_", " "))}</span>
+              ${result.link_url ? `<a class="button" href="${escapeHtml(result.link_url)}">${escapeHtml(result.link_label || "Open Result")}</a>` : ""}
+            </div>
+          </div>
+          <div class="callout ${result.title === "No result yet" && snapshot.phase_tone === "bad" ? "error" : ""}" style="margin-bottom: 1rem;">
+            <strong>${escapeHtml(result.title || "No result yet")}</strong>
+            <div>${escapeHtml(result.body || "")}</div>
+          </div>
+          <div id="session-preview-panel"></div>
+        `;
+      }
+
+      function renderPreview(snapshot) {
+        const previewNode = document.getElementById("session-preview-panel");
         if (snapshot.current_screenshot) {
-          previewPanel.innerHTML = `
+          previewNode.innerHTML = `
             <a href="${escapeHtml(snapshot.current_screenshot.url)}">
               <img class="preview preview-stage-image" src="${escapeHtml(snapshot.current_screenshot.url)}" alt="${escapeHtml(snapshot.current_screenshot.name)}">
             </a>
             <div class="preview-caption">
-              <strong>Current packet preview</strong>
+              <strong>Current browser view</strong>
               <div class="muted">${escapeHtml(snapshot.current_screenshot.name)}</div>
             </div>
           `;
-        } else {
-          previewPanel.innerHTML = '<div class="empty preview-empty">No browser screenshot has been written for this session yet.</div>';
+          return;
         }
+        previewNode.innerHTML = '<div class="empty preview-empty">No browser view has been saved for this session yet.</div>';
+      }
+
+      function renderApproval(snapshot) {
+        const proposal = snapshot.proposal || {};
+        const proposalPayload = proposal.action_payload || {};
+        if (!proposal.proposal_id) {
+          approvalPanel.innerHTML = '<div class="empty">No operator action is waiting right now.</div>';
+          return;
+        }
+
+        let actionHtml = "";
+        if (proposal.status === "pending") {
+          actionHtml = `
+            <div class="callout" style="margin-bottom: 1rem;">
+              <strong>Needs Action</strong>
+              <div>This proposal is waiting for an operator decision. Approve or reject it here.</div>
+            </div>
+            <div class="grid two">
+              <form method="post" action="/proposals/${encodeURIComponent(proposal.proposal_id)}/approve">
+                <input type="hidden" name="redirect_to" value="/sessions/${encodeURIComponent(snapshot.session.session_id)}">
+                <div class="field">
+                  <label for="approve-${escapeHtml(proposal.proposal_id)}">Approve reason</label>
+                  <textarea id="approve-${escapeHtml(proposal.proposal_id)}" name="reason">approved from session workspace</textarea>
+                </div>
+                <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
+              </form>
+              <form method="post" action="/proposals/${encodeURIComponent(proposal.proposal_id)}/reject">
+                <input type="hidden" name="redirect_to" value="/sessions/${encodeURIComponent(snapshot.session.session_id)}">
+                <div class="field">
+                  <label for="reject-${escapeHtml(proposal.proposal_id)}">Reject reason</label>
+                  <textarea id="reject-${escapeHtml(proposal.proposal_id)}" name="reason"></textarea>
+                </div>
+                <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
+              </form>
+            </div>
+          `;
+        } else if (proposal.status === "approved") {
+          actionHtml = `
+            <div class="callout" style="margin-bottom: 1rem;">
+              <strong>Approved, ready to execute</strong>
+              <div>The approval has already been recorded. Execute when you want the action to run and the session to continue.</div>
+            </div>
+            <form method="post" action="/proposals/${encodeURIComponent(proposal.proposal_id)}/execute">
+              <input type="hidden" name="redirect_to" value="/sessions/${encodeURIComponent(snapshot.session.session_id)}">
+              <button class="primary" type="submit">Execute</button>
+            </form>
+          `;
+        } else if (proposal.status === "executed") {
+          actionHtml = `
+            <div class="callout" style="margin-bottom: 1rem;">
+              <strong>Executed</strong>
+              <div>This proposal already ran. Review the result above, artifacts below, and transcript for follow-up steps.</div>
+            </div>
+          `;
+        } else if (proposal.status === "rejected") {
+          actionHtml = `
+            <div class="callout error" style="margin-bottom: 1rem;">
+              <strong>Rejected</strong>
+              <div>This proposal was rejected. Review the transcript to decide whether to restart or change the task.</div>
+            </div>
+          `;
+        }
+
+        approvalPanel.innerHTML = `
+          <div class="approval-banner-head">
+            <div>
+              <div class="eyebrow">Actions</div>
+              <h3 style="margin-bottom: 0.35rem;">Proposal <code>${escapeHtml(proposal.proposal_id)}</code></h3>
+              <div class="muted">${escapeHtml(proposalStateLabel(proposal.status))}</div>
+            </div>
+            <span class="pill ${proposalTone(proposal.status)}">${escapeHtml(proposal.status || "unknown")}</span>
+          </div>
+          ${proposalPayload.target_url ? `
+            <div class="callout" style="margin-bottom: 1rem;">
+              <strong>${escapeHtml(proposal.action_type || "")}</strong>
+              <div>Target: <code>${escapeHtml(proposalPayload.target_url)}</code></div>
+              <div>Method: ${escapeHtml(proposalPayload.method || "POST")}</div>
+              ${proposal.action_type === "browser_http_request" && proposalPayload.body_preview ? `<details style="margin-top: 0.75rem;"><summary>Request preview</summary><pre>${prettyJson({headers: proposalPayload.header_preview || {}, body_preview: proposalPayload.body_preview, body_sha256: proposalPayload.body_sha256 || "", body_bytes: proposalPayload.body_bytes || 0})}</pre></details>` : ""}
+              ${(proposalPayload.field_preview || []).length ? `<details style="margin-top: 0.75rem;"><summary>Field preview</summary><pre>${prettyJson(proposalPayload.field_preview)}</pre></details>` : ""}
+            </div>
+          ` : ""}
+          ${actionHtml}
+        `;
+      }
+
+      function renderSnapshot(snapshot) {
+        renderResult(snapshot);
+        renderPreview(snapshot);
 
         statusPanel.innerHTML = `
           <div class="status-hero">
             <div>
-              <div class="eyebrow">Current phase</div>
+              <div class="eyebrow">Actions</div>
               <h2 style="margin-bottom: 0.4rem;">${escapeHtml(snapshot.headline)}</h2>
             </div>
             <span class="pill ${escapeHtml(snapshot.phase_tone)}">${escapeHtml(snapshot.session.status)}</span>
           </div>
           <div class="callout ${snapshot.phase_tone === "bad" ? "error" : ""}" style="margin-bottom: 1rem;">
-            <strong>Next action</strong>
+            <strong>What you do next</strong>
             <div>${escapeHtml(snapshot.next_action)}</div>
           </div>
           <dl class="meta-list">
             <div class="meta-row"><dt>Session ID</dt><dd><code>${escapeHtml(snapshot.session.session_id)}</code></dd></div>
             <div class="meta-row"><dt>Task</dt><dd>${escapeHtml(snapshot.session.task)}</dd></div>
             <div class="meta-row"><dt>Mode</dt><dd>${escapeHtml(snapshot.session.launch_mode)}${snapshot.session.model ? ` / <code>${escapeHtml(snapshot.session.model)}</code>` : ""}</dd></div>
+            <div class="meta-row"><dt>Browser capability</dt><dd><code>${escapeHtml(snapshot.session.capability_profile || "bounded_packet")}</code></dd></div>
             <div class="meta-row"><dt>Input URL</dt><dd>${escapeHtml(snapshot.session.input_url || "n/a")}</dd></div>
             <div class="meta-row"><dt>Proposal target</dt><dd>${escapeHtml(snapshot.session.proposal_target_url || "n/a")}</dd></div>
             <div class="meta-row"><dt>Browser URL</dt><dd>${escapeHtml((snapshot.browser_session || {}).current_url || "n/a")}</dd></div>
@@ -348,12 +551,12 @@
                   </div>
                 </div>
                 <details>
-                  <summary>Technical details</summary>
+                  <summary>Raw observable payload</summary>
                   <pre>${prettyJson(item)}</pre>
                 </details>
               </article>
             `).join("")
-          : '<div class="empty">The transcript will appear after the first model decision lands.</div>';
+          : '<div class="empty">The transcript will appear after the first visible model step lands.</div>';
 
         artifactPanel.innerHTML = (snapshot.related_artifacts || []).length
           ? snapshot.related_artifacts.map((artifact) => `
@@ -368,66 +571,21 @@
                 </div>
               </a>
             `).join("")
-          : '<div class="empty">No session artifacts have been written yet.</div>';
+          : '<div class="empty">No session results or artifacts have been written yet.</div>';
 
         logPanel.innerHTML = snapshot.log_tail
           ? `<pre>${escapeHtml(snapshot.log_tail)}</pre>`
           : '<div class="empty">No session log output yet.</div>';
 
-        if (snapshot.session.last_proposal_id) {
-          approvalPanel.innerHTML = `
-            <div class="approval-banner-head">
-              <div>
-                <div class="eyebrow">Approval state</div>
-                <h3 style="margin-bottom: 0.35rem;">Proposal <code>${escapeHtml(snapshot.session.last_proposal_id)}</code></h3>
-              </div>
-              <span class="pill ${snapshot.phase_label === "waiting_for_approval" ? "warn" : "ok"}">${escapeHtml(snapshot.phase_label.replaceAll("_", " "))}</span>
-            </div>
-            ${proposalPayload.target_url ? `
-              <div class="callout" style="margin-bottom: 1rem;">
-                <strong>${escapeHtml(proposal.action_type || "")}</strong>
-                <div>Target: <code>${escapeHtml(proposalPayload.target_url)}</code></div>
-                <div>Method: ${escapeHtml(proposalPayload.method || "POST")}</div>
-                ${(proposalPayload.field_preview || []).length ? `<details style="margin-top: 0.75rem;"><summary>Field preview</summary><pre>${prettyJson(proposalPayload.field_preview)}</pre></details>` : ""}
-              </div>
-            ` : ""}
-            ${snapshot.session.status === "waiting_for_approval" ? `
-              <div class="grid two">
-                <form method="post" action="/proposals/${encodeURIComponent(snapshot.session.last_proposal_id)}/approve">
-                  <input type="hidden" name="redirect_to" value="/sessions/${encodeURIComponent(snapshot.session.session_id)}">
-                  <div class="field">
-                    <label for="approve-${escapeHtml(snapshot.session.last_proposal_id)}">Approve reason</label>
-                    <textarea id="approve-${escapeHtml(snapshot.session.last_proposal_id)}" name="reason">approved from session workspace</textarea>
-                  </div>
-                  <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
-                </form>
-                <form method="post" action="/proposals/${encodeURIComponent(snapshot.session.last_proposal_id)}/reject">
-                  <input type="hidden" name="redirect_to" value="/sessions/${encodeURIComponent(snapshot.session.session_id)}">
-                  <div class="field">
-                    <label for="reject-${escapeHtml(snapshot.session.last_proposal_id)}">Reject reason</label>
-                    <textarea id="reject-${escapeHtml(snapshot.session.last_proposal_id)}" name="reason"></textarea>
-                  </div>
-                  <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
-                </form>
-              </div>
-            ` : `
-              <form method="post" action="/proposals/${encodeURIComponent(snapshot.session.last_proposal_id)}/execute">
-                <input type="hidden" name="redirect_to" value="/sessions/${encodeURIComponent(snapshot.session.session_id)}">
-                <button class="primary" type="submit">Execute</button>
-              </form>
-            `}
-          `;
-        } else {
-          approvalPanel.innerHTML = '<div class="empty">No proposal is attached to this session right now.</div>';
-        }
+        renderApproval(snapshot);
 
         const browserSession = snapshot.browser_session || {};
         browserPanel.innerHTML = browserSession.session_id
           ? `
               <div class="hero">
                 <div>
-                  <h2 style="margin-bottom: 0.35rem;">Interactive Browser</h2>
-                  <div class="muted">Current trusted browser session URL, page packet, and interactable elements.</div>
+                  <h2 style="margin-bottom: 0.35rem;">Actions: Interactive Browser</h2>
+                  <div class="muted">Trusted browser state for this session, including tabs, request gates, and visible interactable elements.</div>
                 </div>
               </div>
               <div class="callout" style="margin-bottom: 1rem;">
@@ -435,6 +593,30 @@
                 <div><code>${escapeHtml(browserSession.session_id)}</code></div>
                 <div class="muted">${escapeHtml(browserSession.current_url || "No current URL yet.")}</div>
               </div>
+              ${(browserSession.tabs || []).length
+                ? `<div class="artifact-list" style="margin-bottom: 1rem;">${browserSession.tabs.map((tab) => `
+                    <div class="artifact-card">
+                      <div>
+                        <strong><code>${escapeHtml(tab.tab_id)}</code></strong>
+                        <div class="muted">${tab.tab_id === browserSession.active_tab_id ? "active tab" : "background tab"}</div>
+                      </div>
+                      <div>
+                        <div>${escapeHtml(tab.page_title || "Untitled tab")}</div>
+                        <div class="muted">${escapeHtml(tab.current_url || "about:blank")}</div>
+                      </div>
+                    </div>
+                  `).join("")}</div>`
+                : ""}
+              ${browserSession.pending_request_preview && browserSession.pending_request_preview.request_id ? `
+                <div class="callout" style="margin-bottom: 1rem;">
+                  <strong>Real browser request paused for approval</strong>
+                  <div>${escapeHtml(browserSession.pending_request_preview.method || "POST")} <code>${escapeHtml(browserSession.pending_request_preview.target_url || "")}</code></div>
+                  <details style="margin-top: 0.75rem;">
+                    <summary>Raw request preview</summary>
+                    <pre>${prettyJson(browserSession.pending_request_preview)}</pre>
+                  </details>
+                </div>
+              ` : ""}
               ${(browserSession.interactable_elements || []).length
                 ? `<div class="artifact-list">${browserSession.interactable_elements.map((item) => `
                     <div class="artifact-card">
@@ -444,17 +626,18 @@
                       </div>
                       <div>
                         <div>${escapeHtml(item.label || item.text || item.name || "Unlabeled element")}</div>
+                        ${(item.actions || []).length ? `<div class="muted">${escapeHtml((item.actions || []).join(", "))}</div>` : ""}
                         ${item.value_preview ? `<div class="muted">${escapeHtml(item.value_preview)}</div>` : ""}
                       </div>
                     </div>
                   `).join("")}</div>`
-                : '<div class="empty">No interactable elements were captured in the current browser packet yet.</div>'}
+                : '<div class="empty">No interactable elements were captured in the current browser view yet.</div>'}
             `
           : `
               <div class="hero">
                 <div>
-                  <h2 style="margin-bottom: 0.35rem;">Interactive Browser</h2>
-                  <div class="muted">Current trusted browser session URL, page packet, and interactable elements.</div>
+                  <h2 style="margin-bottom: 0.35rem;">Actions: Interactive Browser</h2>
+                  <div class="muted">Trusted browser state for this session, including tabs, request gates, and visible interactable elements.</div>
                 </div>
               </div>
               <div class="empty">No interactive browser session is open for this run yet.</div>

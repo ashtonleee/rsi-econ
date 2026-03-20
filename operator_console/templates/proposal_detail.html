@@ -1,13 +1,40 @@
 {% extends "base.html" %}
 {% block content %}
   <section class="panel">
-    <h2>Proposal Detail</h2>
+    <h2>Action Detail</h2>
     {% if bridge_error %}
       <div class="callout error">
         <strong>Bridge data unavailable.</strong>
         <div>{{ bridge_error }}</div>
       </div>
     {% elif proposal %}
+      <div class="callout" style="margin-bottom: 1rem;">
+        <strong>
+          {% if proposal.status == "pending" %}
+            Needs Action
+          {% elif proposal.status == "approved" %}
+            Approved, ready to execute
+          {% elif proposal.status == "executed" %}
+            Executed
+          {% elif proposal.status == "rejected" %}
+            Rejected
+          {% else %}
+            {{ proposal.status }}
+          {% endif %}
+        </strong>
+        <div>
+          {% if proposal.status == "pending" %}
+            Review the request and decide whether to approve or reject it.
+          {% elif proposal.status == "approved" %}
+            Approval is already recorded. Execute when you want the action to run.
+          {% elif proposal.status == "executed" %}
+            This action already ran. Review the execution result below.
+          {% elif proposal.status == "rejected" %}
+            This action was rejected. Review the decision note and payload below.
+          {% endif %}
+        </div>
+      </div>
+
       <dl class="meta-list">
         <div class="meta-row">
           <dt>Proposal ID</dt>
@@ -15,7 +42,7 @@
         </div>
         <div class="meta-row">
           <dt>Status</dt>
-          <dd><span class="pill">{{ proposal.status }}</span></dd>
+          <dd><span class="pill {% if proposal.status == 'executed' %}ok{% elif proposal.status in ['pending', 'approved'] %}warn{% elif proposal.status == 'rejected' %}bad{% endif %}">{{ proposal.status }}</span></dd>
         </div>
         <div class="meta-row">
           <dt>Action type</dt>
@@ -56,7 +83,7 @@
 
       {% if proposal.status == "pending" %}
         <section class="panel" style="box-shadow: none; margin-top: 1rem;">
-          <h3>Decision Actions</h3>
+          <h3>Actions</h3>
           <div class="grid two">
             <form method="post" action="/proposals/{{ proposal.proposal_id }}/approve">
               <input type="hidden" name="redirect_to" value="/proposals/{{ proposal.proposal_id }}">
@@ -79,7 +106,7 @@
         </section>
       {% elif proposal.status == "approved" %}
         <section class="panel" style="box-shadow: none; margin-top: 1rem;">
-          <h3>Execution Action</h3>
+          <h3>Actions</h3>
           <form method="post" action="/proposals/{{ proposal.proposal_id }}/execute">
             <input type="hidden" name="redirect_to" value="/proposals/{{ proposal.proposal_id }}">
             <button class="primary" type="submit">Execute</button>
@@ -87,7 +114,7 @@
         </section>
       {% endif %}
 
-      <h3 style="margin-top: 1rem;">Action Payload</h3>
+      <h3 style="margin-top: 1rem;">Observable Payload</h3>
       <pre>{{ proposal.action_payload | pretty_json }}</pre>
 
       {% if proposal.execution_result %}

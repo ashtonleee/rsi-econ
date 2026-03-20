@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -27,6 +29,36 @@ def test_litellm_defaults_to_deterministic_mock(monkeypatch):
     body = response.json()
     assert body["model"] == "stage1-deterministic"
     assert body["choices"][0]["message"]["content"] == "stage1 deterministic reply: summarize this"
+
+
+@pytest.mark.fast
+def test_litellm_mock_returns_session_action_json_for_session_prompt(monkeypatch):
+    monkeypatch.delenv("RSI_LITELLM_RESPONSE_MODE", raising=False)
+    monkeypatch.delenv("RSI_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    prompt = {
+        "session_id": "session-1",
+        "allowed_tools": ["bridge_status", "finish"],
+        "instructions": ["Return JSON."],
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "stage1-deterministic",
+                "messages": [{"role": "user", "content": json.dumps(prompt)}],
+            },
+        )
+
+    assert response.status_code == 200
+    content = response.json()["choices"][0]["message"]["content"]
+    assert json.loads(content) == {
+        "tool": "bridge_status",
+        "reason": "deterministic mock session action",
+        "params": {},
+    }
 
 
 @pytest.mark.fast

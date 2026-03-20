@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
   <section class="panel">
-    <div class="hero">
-      <div>
-        <h2 style="margin-bottom: 0.35rem;">Start Session</h2>
-        <div class="muted">Create a freeform session that can browse allowlisted pages, write workspace artifacts, and pause for approval when it needs a consequential action.</div>
+      <div class="hero">
+        <div>
+          <h2 style="margin-bottom: 0.35rem;">Start Session</h2>
+        <div class="muted">Create a freeform session that can browse, write workspace artifacts, and pause for approval when it reaches a consequential action. Choose the bounded mode for allowlisted packet browsing or the public workflow mode for a more capable trusted browser proof of concept.</div>
+        </div>
       </div>
-    </div>
   </section>
 
   {% if active_session %}
@@ -30,6 +30,13 @@
           <select id="launch_mode" name="launch_mode">
             <option value="default">default</option>
             <option value="provider">provider</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="capability_profile">Browser capability</label>
+          <select id="capability_profile" name="capability_profile">
+            <option value="bounded_packet">bounded_packet</option>
+            <option value="workflow_browser_public">workflow_browser_public</option>
           </select>
         </div>
         <div class="field" data-provider-only="true" style="display: none;">

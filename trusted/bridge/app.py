@@ -15,12 +15,24 @@ from shared.schemas import (
     AgentRunEventRequest,
     BrowserFollowHrefRequest,
     BrowserFollowHrefResponse,
+    BrowserHttpRequestPreview,
+    BrowserSessionActionResponse,
+    BrowserSessionBackRequest,
     BrowserSessionClickRequest,
+    BrowserSessionCloseTabRequest,
+    BrowserSessionFillRequest,
+    BrowserSessionForwardRequest,
+    BrowserSessionHoverRequest,
+    BrowserSessionNavigateRequest,
+    BrowserSessionNewTabRequest,
     BrowserSessionOpenRequest,
+    BrowserSessionPressRequest,
     BrowserSessionSelectRequest,
     BrowserSessionSetCheckedRequest,
     BrowserSessionSnapshotResponse,
+    BrowserSessionSwitchTabRequest,
     BrowserSessionTypeRequest,
+    BrowserSessionWaitForRequest,
     BrowserSubmitProposalRequest,
     BrowserRenderRequest,
     BrowserRenderResponse,
@@ -916,6 +928,7 @@ def browser_session_snapshot_summary(snapshot, *, reason: str | None = None) -> 
     summary = {
         "session_id": snapshot.session_id,
         "snapshot_id": snapshot.snapshot_id,
+        "capability_profile": getattr(snapshot, "capability_profile", "bounded_packet"),
         "current_url": snapshot.current_url,
         "host": host,
         "http_status": snapshot.http_status,
@@ -930,6 +943,16 @@ def browser_session_snapshot_summary(snapshot, *, reason: str | None = None) -> 
         "resolved_ips": list(snapshot.resolved_ips),
         "channel_records": [record.model_dump() for record in snapshot.channel_records],
         "interactable_count": len(snapshot.interactable_elements),
+        "active_tab_id": getattr(snapshot, "active_tab_id", ""),
+        "tabs": [
+            tab.model_dump() if hasattr(tab, "model_dump") else dict(tab)
+            for tab in getattr(snapshot, "tabs", [])
+        ],
+        "pending_request_preview": (
+            snapshot.pending_request_preview.model_dump()
+            if getattr(snapshot, "pending_request_preview", None) is not None
+            else None
+        ),
         "request_forwarded": any(record.request_forwarded for record in snapshot.channel_records),
     }
     if reason:
@@ -976,6 +999,43 @@ def browser_submit_preview_summary(preview, *, reason: str | None = None) -> dic
     }
     if reason:
         summary["reason"] = reason
+    return summary
+
+
+def browser_http_request_preview_summary(preview: BrowserHttpRequestPreview, *, reason: str | None = None) -> dict:
+    summary = {
+        "request_id": preview.request_id,
+        "session_id": preview.session_id,
+        "snapshot_id": preview.snapshot_id,
+        "tab_id": preview.tab_id,
+        "current_url": preview.current_url,
+        "target_url": preview.target_url,
+        "host": urlsplit(preview.target_url).hostname or "",
+        "method": preview.method,
+        "header_preview": dict(preview.header_preview),
+        "body_preview": preview.body_preview,
+        "body_sha256": preview.body_sha256,
+        "body_bytes": preview.body_bytes,
+        "trigger_action": preview.trigger_action,
+        "trigger_element_id": preview.trigger_element_id,
+    }
+    if reason:
+        summary["reason"] = reason
+    return summary
+
+
+def browser_session_action_summary(action) -> dict:
+    summary = {
+        "outcome": action.outcome,
+        "proposal_preview": (
+            browser_http_request_preview_summary(action.proposal_preview)
+            if getattr(action, "proposal_preview", None) is not None
+            else None
+        ),
+    }
+    snapshot = getattr(action, "snapshot", None)
+    if snapshot is not None:
+        summary["snapshot"] = browser_session_snapshot_summary(snapshot)
     return summary
 
 
@@ -1045,6 +1105,116 @@ async def browser_session_call(
         summary=success_summary(result),
     )
     return result, None
+
+
+def _browser_snapshot_response(
+    *,
+    request_id: str,
+    trace_id: str,
+    snapshot,
+):
+    return BrowserSessionSnapshotResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **snapshot.model_dump(),
+    )
+
+
+def _browser_action_response(
+    *,
+    request_id: str,
+    trace_id: str,
+    action,
+    proposal: ProposalRecord | None = None,
+) -> BrowserSessionActionResponse:
+    snapshot = getattr(action, "snapshot", None)
+    response_snapshot = None
+    if snapshot is not None:
+        response_snapshot = BrowserSessionSnapshotResponse(
+            request_id=request_id,
+            trace_id=trace_id,
+            **snapshot.model_dump(),
+        )
+    return BrowserSessionActionResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome=action.outcome,
+        snapshot=response_snapshot,
+        proposal_preview=getattr(action, "proposal_preview", None),
+        proposal=proposal,
+    )
+
+
+async def browser_session_action_route(
+    *,
+    actor: str,
+    request_id: str,
+    trace_id: str,
+    response: Response,
+    success_event_type: str,
+    denied_event_type: str,
+    error_event_type: str,
+    fallback_error_summary: dict,
+    call,
+) -> BrowserSessionActionResponse | JSONResponse:
+    action, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type=success_event_type,
+        denied_event_type=denied_event_type,
+        error_event_type=error_event_type,
+        success_summary=browser_session_action_summary,
+        fallback_error_summary=fallback_error_summary,
+        call=call,
+    )
+    if error is not None:
+        return error
+
+    proposal = None
+    if action.outcome == "proposal_required" and action.proposal_preview is not None:
+        preview = action.proposal_preview
+        proposal = app.state.proposal_store.create_proposal(
+            action_type="browser_http_request",
+            action_payload={
+                "request_id": preview.request_id,
+                "session_id": preview.session_id,
+                "snapshot_id": preview.snapshot_id,
+                "tab_id": preview.tab_id,
+                "current_url": preview.current_url,
+                "target_url": preview.target_url,
+                "method": preview.method,
+                "header_preview": dict(preview.header_preview),
+                "body_preview": preview.body_preview,
+                "body_sha256": preview.body_sha256,
+                "body_bytes": preview.body_bytes,
+                "trigger_action": preview.trigger_action,
+                "trigger_element_id": preview.trigger_element_id,
+            },
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+        append_event(
+            event_type="browser_http_request_proposal_created",
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="success",
+            summary={
+                "proposal_id": proposal.proposal_id,
+                "action_type": proposal.action_type,
+                **browser_http_request_preview_summary(preview),
+            },
+        )
+
+    response.headers.update(make_headers(request_id, trace_id))
+    return _browser_action_response(
+        request_id=request_id,
+        trace_id=trace_id,
+        action=action,
+        proposal=proposal,
+    )
 
 
 @app.post("/web/fetch", response_model=WebFetchResponse)
@@ -1511,6 +1681,344 @@ async def bridge_browser_session_set_checked(
         request_id=request_id,
         trace_id=trace_id,
         **snapshot.model_dump(),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/navigate", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_navigate(
+    session_id: str,
+    payload: BrowserSessionNavigateRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_navigate",
+        denied_event_type="browser_session_navigate_denied",
+        error_event_type="browser_session_navigate_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": payload.url,
+            "host": urlsplit(payload.url).hostname or "",
+        },
+        call=lambda: app.state.clients.browser_session_navigate(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/actions/click", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_click_action(
+    session_id: str,
+    payload: BrowserSessionClickRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_click_action",
+        denied_event_type="browser_session_click_action_denied",
+        error_event_type="browser_session_click_action_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_click_action(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/fill", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_fill(
+    session_id: str,
+    payload: BrowserSessionFillRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_fill",
+        denied_event_type="browser_session_fill_denied",
+        error_event_type="browser_session_fill_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_fill(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/actions/select", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_select_action(
+    session_id: str,
+    payload: BrowserSessionSelectRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_select_action",
+        denied_event_type="browser_session_select_action_denied",
+        error_event_type="browser_session_select_action_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_select_action(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/actions/set_checked", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_set_checked_action(
+    session_id: str,
+    payload: BrowserSessionSetCheckedRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_set_checked_action",
+        denied_event_type="browser_session_set_checked_action_denied",
+        error_event_type="browser_session_set_checked_action_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_set_checked_action(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/press", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_press(
+    session_id: str,
+    payload: BrowserSessionPressRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_press",
+        denied_event_type="browser_session_press_denied",
+        error_event_type="browser_session_press_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_press(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/hover", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_hover(
+    session_id: str,
+    payload: BrowserSessionHoverRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_hover",
+        denied_event_type="browser_session_hover_denied",
+        error_event_type="browser_session_hover_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_hover(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/wait_for", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_wait_for(
+    session_id: str,
+    payload: BrowserSessionWaitForRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_wait_for",
+        denied_event_type="browser_session_wait_for_denied",
+        error_event_type="browser_session_wait_for_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_wait_for(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/back", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_back(
+    session_id: str,
+    payload: BrowserSessionBackRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_back",
+        denied_event_type="browser_session_back_denied",
+        error_event_type="browser_session_back_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_back(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/forward", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_forward(
+    session_id: str,
+    payload: BrowserSessionForwardRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_forward",
+        denied_event_type="browser_session_forward_denied",
+        error_event_type="browser_session_forward_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_forward(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/tabs/new", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_new_tab(
+    session_id: str,
+    payload: BrowserSessionNewTabRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_new_tab",
+        denied_event_type="browser_session_new_tab_denied",
+        error_event_type="browser_session_new_tab_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": "",
+            "current_url": payload.url,
+            "host": urlsplit(payload.url).hostname or "",
+        },
+        call=lambda: app.state.clients.browser_session_new_tab(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/tabs/switch", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_switch_tab(
+    session_id: str,
+    payload: BrowserSessionSwitchTabRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_switch_tab",
+        denied_event_type="browser_session_switch_tab_denied",
+        error_event_type="browser_session_switch_tab_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_switch_tab(session_id, payload),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/tabs/close", response_model=BrowserSessionActionResponse)
+async def bridge_browser_session_close_tab(
+    session_id: str,
+    payload: BrowserSessionCloseTabRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionActionResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    return await browser_session_action_route(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        response=response,
+        success_event_type="browser_session_close_tab",
+        denied_event_type="browser_session_close_tab_denied",
+        error_event_type="browser_session_close_tab_error",
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_close_tab(session_id, payload),
     )
 
 

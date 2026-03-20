@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from shared.schemas import (
+    BrowserHttpRequestExecuteInternalResponse,
     BrowserSessionSnapshotInternalResponse,
     BrowserSubmitExecuteInternalResponse,
     EgressFetchResponse,
@@ -339,3 +340,51 @@ async def test_browser_submit_missing_session_maps_cleanly():
         action_allowlist_hosts=ALLOWLIST,
     )
     assert result["error"] == "browser_session_missing"
+
+
+@pytest.mark.anyio
+async def test_browser_http_request_success_returns_structured_result():
+    clients = AsyncMock()
+    clients.browser_execute_http_request.return_value = BrowserHttpRequestExecuteInternalResponse(
+        session_id="session-1",
+        request_id="paused-request-1",
+        target_url="http://public.example/form-submit",
+        method="POST",
+        snapshot=BrowserSessionSnapshotInternalResponse(
+            session_id="session-1",
+            snapshot_id="snap-3",
+            current_url="http://public.example/thank-you",
+            http_status=200,
+            page_title="Thank you",
+            meta_description="",
+            rendered_text="Thanks",
+            rendered_text_sha256="sha-text",
+            text_bytes=6,
+            text_truncated=False,
+            screenshot_png_base64="",
+            screenshot_sha256="sha-shot",
+            screenshot_bytes=0,
+            observed_hosts=["public.example"],
+            resolved_ips=["1.2.3.4"],
+            channel_records=[],
+            interactable_elements=[],
+        ),
+    )
+    proposal = _make_proposal(
+        "browser_http_request",
+        {
+            "request_id": "paused-request-1",
+            "session_id": "session-1",
+            "target_url": "http://public.example/form-submit",
+            "method": "POST",
+        },
+    )
+    result = await execute_proposal(
+        proposal,
+        clients=clients,
+        action_allowlist_hosts=ALLOWLIST,
+    )
+    assert result["request_id"] == "paused-request-1"
+    assert result["target_url"] == "http://public.example/form-submit"
+    assert result["current_url"] == "http://public.example/thank-you"
+    assert result["snapshot_id"] == "snap-3"

@@ -346,6 +346,9 @@ class BrowserFollowHrefResponse(BrowserFollowHrefInternalResponse):
     trace_id: str
 
 
+BrowserCapabilityProfile = Literal["bounded_packet", "workflow_browser_public"]
+
+
 BrowserInteractableKind = Literal[
     "link",
     "button",
@@ -361,28 +364,55 @@ BrowserInteractableKind = Literal[
 class BrowserInteractable(BaseModel):
     element_id: str
     kind: BrowserInteractableKind
+    tab_id: str = ""
     label: str = ""
     text: str = ""
     name: str = ""
     input_type: str = ""
+    tag_name: str = ""
     placeholder: str = ""
     href: str = ""
     disabled: bool = False
     checked: bool = False
     value_preview: str = ""
+    actions: list[str] = Field(default_factory=list)
+
+
+class BrowserTabInfo(BaseModel):
+    tab_id: str
+    current_url: str = ""
+    page_title: str = ""
 
 
 class BrowserSessionOpenRequest(BaseModel):
     url: str
+    capability_profile: BrowserCapabilityProfile = "bounded_packet"
 
 
 class BrowserSessionSnapshotRequest(BaseModel):
     session_id: str
 
 
+class BrowserHttpRequestPreview(BaseModel):
+    request_id: str
+    session_id: str
+    snapshot_id: str
+    tab_id: str
+    current_url: str
+    target_url: str
+    method: str
+    header_preview: dict[str, str] = Field(default_factory=dict)
+    body_preview: str = ""
+    body_sha256: str = ""
+    body_bytes: int = 0
+    trigger_action: str = ""
+    trigger_element_id: str = ""
+
+
 class BrowserSessionSnapshotInternalResponse(BaseModel):
     session_id: str
     snapshot_id: str
+    capability_profile: BrowserCapabilityProfile = "bounded_packet"
     current_url: str
     http_status: int | None = None
     page_title: str = ""
@@ -397,6 +427,9 @@ class BrowserSessionSnapshotInternalResponse(BaseModel):
     observed_hosts: list[str] = Field(default_factory=list)
     resolved_ips: list[str] = Field(default_factory=list)
     channel_records: list[BrowserChannelRecord] = Field(default_factory=list)
+    active_tab_id: str = ""
+    tabs: list[BrowserTabInfo] = Field(default_factory=list)
+    pending_request_preview: BrowserHttpRequestPreview | None = None
     interactable_elements: list[BrowserInteractable] = Field(default_factory=list)
 
 
@@ -430,6 +463,53 @@ class BrowserSubmitProposalRequest(BrowserSessionElementActionRequest):
     pass
 
 
+class BrowserSessionNavigateRequest(BaseModel):
+    snapshot_id: str = ""
+    url: str
+
+
+class BrowserSessionFillRequest(BrowserSessionElementActionRequest):
+    text: str
+
+
+class BrowserSessionPressRequest(BaseModel):
+    snapshot_id: str
+    key: str
+    element_id: str = ""
+
+
+class BrowserSessionHoverRequest(BrowserSessionElementActionRequest):
+    pass
+
+
+class BrowserSessionWaitForRequest(BaseModel):
+    snapshot_id: str = ""
+    text: str = ""
+    time_seconds: float = 0.0
+
+
+class BrowserSessionBackRequest(BaseModel):
+    snapshot_id: str = ""
+
+
+class BrowserSessionForwardRequest(BaseModel):
+    snapshot_id: str = ""
+
+
+class BrowserSessionNewTabRequest(BaseModel):
+    url: str = ""
+
+
+class BrowserSessionSwitchTabRequest(BaseModel):
+    snapshot_id: str = ""
+    tab_id: str
+
+
+class BrowserSessionCloseTabRequest(BaseModel):
+    snapshot_id: str = ""
+    tab_id: str = ""
+
+
 class BrowserSubmitFieldPreview(BaseModel):
     name: str
     kind: str
@@ -458,6 +538,18 @@ class BrowserSubmitExecuteInternalResponse(BaseModel):
     field_preview: list[BrowserSubmitFieldPreview] = Field(default_factory=list)
 
 
+class BrowserHttpRequestExecuteRequest(BaseModel):
+    request_id: str
+
+
+class BrowserHttpRequestExecuteInternalResponse(BaseModel):
+    session_id: str
+    request_id: str
+    snapshot: BrowserSessionSnapshotInternalResponse
+    target_url: str
+    method: str
+
+
 class EgressFetchRequest(BaseModel):
     url: str
     channel: str
@@ -466,6 +558,7 @@ class EgressFetchRequest(BaseModel):
     method: str = "GET"
     request_body_base64: str = ""
     request_content_type: str = ""
+    allow_public_hosts: bool = False
 
 
 class EgressFetchResponse(BaseModel):
@@ -553,6 +646,21 @@ class ProposalState(BaseModel):
     executed: int = 0
     failed: int = 0
     recent_proposals: list[ProposalRecord] = Field(default_factory=list)
+
+
+class BrowserSessionActionInternalResponse(BaseModel):
+    outcome: Literal["snapshot", "proposal_required"]
+    snapshot: BrowserSessionSnapshotInternalResponse | None = None
+    proposal_preview: BrowserHttpRequestPreview | None = None
+
+
+class BrowserSessionActionResponse(BaseModel):
+    request_id: str
+    trace_id: str
+    outcome: Literal["snapshot", "proposal_required"]
+    snapshot: BrowserSessionSnapshotResponse | None = None
+    proposal_preview: BrowserHttpRequestPreview | None = None
+    proposal: ProposalRecord | None = None
 
 
 # Resolve forward reference in BridgeStatusReport

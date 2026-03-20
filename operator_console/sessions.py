@@ -13,6 +13,7 @@ from shared.schemas import ProposalRecord
 
 
 ACTIVE_SESSION_STATUSES = {"starting", "running", "resuming"}
+CAPABILITY_PROFILES = {"bounded_packet", "workflow_browser_public"}
 
 
 class SessionBusyError(RuntimeError):
@@ -23,6 +24,7 @@ class SessionBusyError(RuntimeError):
 class SessionCreateRequest:
     task: str
     launch_mode: Literal["default", "provider"]
+    capability_profile: Literal["bounded_packet", "workflow_browser_public"] = "bounded_packet"
     model: str = ""
     input_url: str = ""
     proposal_target_url: str = ""
@@ -31,6 +33,7 @@ class SessionCreateRequest:
     def __post_init__(self):
         assert self.task.strip(), "task is required"
         assert self.launch_mode in {"default", "provider"}
+        assert self.capability_profile in CAPABILITY_PROFILES
         assert self.max_turns_per_resume > 0, "max_turns_per_resume must be positive"
 
     def to_dict(self) -> dict:
@@ -45,6 +48,7 @@ class SessionRecord:
     status: Literal["starting", "running", "waiting_for_approval", "resuming", "finished", "failed"]
     task: str
     launch_mode: Literal["default", "provider"]
+    capability_profile: Literal["bounded_packet", "workflow_browser_public"] = "bounded_packet"
     model: str = ""
     input_url: str = ""
     proposal_target_url: str = ""
@@ -124,6 +128,8 @@ class SessionManager:
                 request.task,
                 "--launch-mode",
                 request.launch_mode,
+                "--capability-profile",
+                request.capability_profile,
                 "--max-turns-per-resume",
                 str(request.max_turns_per_resume),
             ]
@@ -150,6 +156,7 @@ class SessionManager:
             status="starting",
             task=request.task,
             launch_mode=request.launch_mode,
+            capability_profile=request.capability_profile,
             model=request.model,
             input_url=request.input_url,
             proposal_target_url=request.proposal_target_url,
@@ -179,6 +186,7 @@ class SessionManager:
                 "input_url": request.input_url,
                 "proposal_target_url": request.proposal_target_url,
                 "launch_mode": request.launch_mode,
+                "capability_profile": request.capability_profile,
                 "model": request.model,
                 "resume_count": 0,
                 "current_run_id": "",
@@ -258,6 +266,7 @@ class SessionManager:
                         SessionCreateRequest(
                             task=updated.task,
                             launch_mode=updated.launch_mode,
+                            capability_profile=updated.capability_profile,
                             model=updated.model,
                             input_url=updated.input_url,
                             proposal_target_url=updated.proposal_target_url,

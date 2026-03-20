@@ -885,6 +885,81 @@ async def browser_interactive_help():
     )
 
 
+@app.get("/browser/public-workflow-start")
+async def browser_public_workflow_start():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Public workflow start fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Public workflow start fixture</h1>
+      <p>This page lives on a host outside the bounded browser allowlist.</p>
+      <p>Use workflow_browser_public mode to continue the mediated workflow.</p>
+    </main>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/public-workflow-step")
+async def browser_public_workflow_step():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Public workflow step fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Public workflow step fixture</h1>
+      <p>Fill the email field, then send a real browser request that pauses for approval.</p>
+      <label>
+        Email
+        <input type="email" name="email" value="" placeholder="operator@example.com" />
+      </label>
+      <button id="send-request" type="button">Send public workflow request</button>
+      <p id="status">No result yet.</p>
+    </main>
+    <script>
+      const button = document.getElementById("send-request");
+      const status = document.getElementById("status");
+      button.addEventListener("click", async () => {
+        const email = String(document.querySelector('input[name="email"]').value || "");
+        const response = await fetch("http://blocked.test/browser/public-workflow-result", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            email,
+            source: window.location.pathname,
+          }),
+        });
+        const payload = await response.json();
+        status.textContent = payload.message;
+      });
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.post("/browser/public-workflow-result")
+async def browser_public_workflow_result(request: Request):
+    payload = await request.json()
+    email = str(payload.get("email", ""))
+    source = str(payload.get("source", ""))
+    return {
+        "ok": True,
+        "message": f"Workflow submitted for {email} from {source}.",
+    }
+
+
 @app.post("/browser/interactive-result")
 async def browser_interactive_result(request: Request):
     raw = (await request.body()).decode("utf-8", errors="ignore")

@@ -1,7 +1,7 @@
-"""Unit tests for egress POST method support (Stage 8).
+"""Unit tests for egress mutating method support.
 
-Tests that POST is allowed only on the consequential_action channel,
-and that existing GET-only channels reject POST requests.
+Tests that mutating methods are allowed only on the consequential_action
+channel, and that existing GET-only channels reject them.
 """
 import base64
 
@@ -78,12 +78,23 @@ def test_post_on_subresource_channel_returns_405(client):
     assert resp.status_code == 405
 
 
-def test_unsupported_method_returns_405(client):
-    """Methods other than GET and POST must return 405."""
+def test_delete_on_consequential_action_channel_is_accepted(client):
+    """DELETE on consequential_action should be allowed for approved browser requests."""
     resp = client.post("/internal/fetch", json={
         "url": "http://example.com/data",
         "channel": "consequential_action",
         "method": "DELETE",
+        "max_body_bytes": 4096,
+    })
+    assert resp.status_code != 405
+
+
+def test_unsupported_method_returns_405(client):
+    """Methods outside the supported mutating set must return 405."""
+    resp = client.post("/internal/fetch", json={
+        "url": "http://example.com/data",
+        "channel": "consequential_action",
+        "method": "OPTIONS",
         "max_body_bytes": 4096,
     })
     assert resp.status_code == 405

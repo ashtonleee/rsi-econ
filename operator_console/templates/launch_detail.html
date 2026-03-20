@@ -5,8 +5,8 @@
     <article class="panel preview-stage">
       <div class="hero">
         <div>
-          <h2 style="margin-bottom: 0.35rem;">Live Workspace</h2>
-          <div class="muted">Browser visuals first, with live updates from the local launch state and trusted bridge events.</div>
+          <h2 style="margin-bottom: 0.35rem;">Results</h2>
+          <div class="muted">Saved browser views and run output from this constrained, allowlisted launch.</div>
         </div>
         <div class="inline-actions">
           <span class="pill {{ snapshot.phase_tone }}">{{ snapshot.phase_label.replace("_", " ") }}</span>
@@ -22,7 +22,7 @@
             <img class="preview preview-stage-image" src="{{ snapshot.current_screenshot.url }}" alt="{{ snapshot.current_screenshot.name }}">
           </a>
           <div class="preview-caption">
-            <strong>Current preview</strong>
+            <strong>Current browser view</strong>
             <div class="muted">{{ snapshot.current_screenshot.name }}</div>
           </div>
         {% else %}
@@ -48,14 +48,14 @@
     <article class="panel status-stage" id="status-panel">
       <div class="status-hero">
         <div>
-          <div class="eyebrow">Current phase</div>
+          <div class="eyebrow">Actions</div>
           <h2 style="margin-bottom: 0.4rem;">{{ snapshot.headline }}</h2>
         </div>
         <span class="pill {{ snapshot.phase_tone }}">{{ launch.status }}</span>
       </div>
 
       <div class="callout {% if snapshot.phase_tone == 'bad' %}error{% endif %}" style="margin-bottom: 1rem;">
-        <strong>Next action</strong>
+        <strong>What you do next</strong>
         <div>{{ snapshot.next_action }}</div>
       </div>
 
@@ -110,7 +110,7 @@
       {% for proposal in snapshot.related_proposals %}
         <div class="approval-banner-head">
           <div>
-            <div class="eyebrow">Approval state</div>
+          <div class="eyebrow">Actions</div>
             <h3 style="margin-bottom: 0.35rem;">{{ proposal.action_type }} for <code>{{ proposal.proposal_id }}</code></h3>
             <div class="muted">{{ proposal.action_payload.url if proposal.action_payload and proposal.action_payload.url else "No target URL recorded." }}</div>
           </div>
@@ -118,7 +118,7 @@
         </div>
         {% if proposal.status == "pending" %}
           <div class="callout" style="margin-bottom: 1rem;">
-            <strong>Pending approval</strong>
+            <strong>Needs Action</strong>
             <div>The agent is paused until you approve or reject this proposal.</div>
           </div>
           <div class="grid two">
@@ -164,8 +164,8 @@
     <article class="panel">
       <div class="hero">
         <div>
-          <h2 style="margin-bottom: 0.35rem;">Live Timeline</h2>
-          <div class="muted">Newest meaningful items stay near the top. Technical details are still available underneath each summary.</div>
+          <h2 style="margin-bottom: 0.35rem;">Transcript</h2>
+          <div class="muted">Observable run steps first, with raw payloads available under each summary.</div>
         </div>
       </div>
       <div class="timeline" id="live-timeline">
@@ -188,7 +188,7 @@
                 </div>
               </div>
               <details>
-                <summary>Technical details</summary>
+                <summary>Raw observable payload</summary>
                 <pre>{{ event.summary | pretty_json }}</pre>
               </details>
             </article>
@@ -200,7 +200,7 @@
     </article>
 
     <article class="panel">
-      <h2>Artifacts And Logs</h2>
+      <h2>Results And Logs</h2>
       <div class="artifact-list" id="live-artifacts">
         {% if snapshot.related_artifacts %}
           {% for artifact in snapshot.related_artifacts %}
@@ -318,7 +318,7 @@
             <img class="preview preview-stage-image" src="${escapeHtml(image.url)}" alt="${escapeHtml(image.name)}">
           </a>
           <div class="preview-caption">
-            <strong>Current preview</strong>
+            <strong>Current browser view</strong>
             <div class="muted">${escapeHtml(image.name)}</div>
           </div>
           ${filmstrip && (snapshot.recent_screenshots || []).length > 1 ? `<div class="filmstrip">${filmstrip}</div>` : ""}
@@ -344,13 +344,13 @@
         statusPanel.innerHTML = `
           <div class="status-hero">
             <div>
-              <div class="eyebrow">Current phase</div>
+              <div class="eyebrow">Actions</div>
               <h2 style="margin-bottom: 0.4rem;">${escapeHtml(snapshot.headline)}</h2>
             </div>
             <span class="pill ${escapeHtml(snapshot.phase_tone)}">${escapeHtml(launch.status)}</span>
           </div>
           <div class="callout ${snapshot.phase_tone === "bad" ? "error" : ""}" style="margin-bottom: 1rem;">
-            <strong>Next action</strong>
+            <strong>What you do next</strong>
             <div>${escapeHtml(snapshot.next_action)}</div>
           </div>
           <dl class="meta-list">
@@ -403,7 +403,7 @@
           let body = `
             <div class="approval-banner-head">
               <div>
-                <div class="eyebrow">Approval state</div>
+                <div class="eyebrow">Actions</div>
                 <h3 style="margin-bottom: 0.35rem;">${escapeHtml(proposal.action_type)} for <code>${escapeHtml(proposal.proposal_id)}</code></h3>
                 <div class="muted">${escapeHtml(target)}</div>
               </div>
@@ -414,7 +414,7 @@
           if (proposal.status === "pending") {
             body += `
               <div class="callout" style="margin-bottom: 1rem;">
-                <strong>Pending approval</strong>
+                <strong>Needs Action</strong>
                 <div>The agent is paused until you approve or reject this proposal.</div>
               </div>
               <div class="grid two">
@@ -479,7 +479,7 @@
               </div>
             </div>
             <details>
-              <summary>Technical details</summary>
+                  <summary>Raw observable payload</summary>
               <pre>${prettyJson(event.summary)}</pre>
             </details>
           </article>

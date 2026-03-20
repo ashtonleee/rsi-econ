@@ -200,6 +200,7 @@ class FakeSessionManager:
                 "workspace_state": {
                     "last_proposal": {
                         "proposal_id": "pending-1",
+                        "status": "pending",
                         "action_type": "http_post",
                         "action_payload": {"url": "https://httpbin.org/post"},
                     }
@@ -370,12 +371,16 @@ def test_session_detail_and_stream_render_transcript_and_preview(tmp_path: Path)
                     break
 
     assert html_response.status_code == 200
-    assert "Session Workspace" in html_response.text
+    assert "Results" in html_response.text
+    assert "Actions" in html_response.text
+    assert "Transcript" in html_response.text
+    assert "No result yet" in html_response.text
     assert "bridge_create_proposal" in html_response.text
     assert "turn_001_browser.png" in html_response.text
     assert api_response.status_code == 200
     assert api_response.json()["session"]["session_id"] == "session-1"
     assert api_response.json()["phase_label"] == "waiting_for_approval"
+    assert api_response.json()["proposal"]["status"] == "pending"
     assert "event: snapshot" in "\n".join(chunks)
 
 
@@ -386,6 +391,7 @@ def test_session_detail_renders_browser_submit_preview_and_interactables(tmp_pat
     session_manager.snapshots["session-1"]["workspace_state"] = {
         "last_proposal": {
             "proposal_id": "pending-1",
+            "status": "pending",
             "action_type": "browser_submit",
             "action_payload": {
                 "target_url": "http://allowed.test/browser/interactive-result",
@@ -426,6 +432,47 @@ def test_session_detail_renders_browser_submit_preview_and_interactables(tmp_pat
     assert "Claim reward" in response.text
     assert "interactive-result" in response.text
     assert "Field preview" in response.text
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize(
+    ("proposal_status", "expected_text", "unexpected_text"),
+    [
+        ("approved", "Approved, ready to execute", "Approve</button>"),
+        ("executed", "Executed", "Execute</button>"),
+        ("rejected", "Rejected", "Execute</button>"),
+    ],
+)
+def test_session_detail_renders_status_specific_action_state(
+    tmp_path: Path,
+    proposal_status: str,
+    expected_text: str,
+    unexpected_text: str,
+):
+    settings = make_settings(tmp_path)
+    session_manager = FakeSessionManager(settings)
+    session_manager.snapshots["session-1"]["workspace_state"] = {
+        "last_proposal": {
+            "proposal_id": "pending-1",
+            "status": proposal_status,
+            "action_type": "http_post",
+            "action_payload": {"url": "https://httpbin.org/post"},
+        }
+    }
+    app = create_app(
+        settings=settings,
+        bridge_api=FakeBridgeAPI(proposals=make_proposals()),
+        repo_data=RepoData(settings),
+        session_manager=session_manager,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/sessions/session-1")
+    rendered = response.text.split('<script id="session-snapshot"', 1)[0]
+
+    assert response.status_code == 200
+    assert expected_text in rendered
+    assert unexpected_text not in rendered
 
 
 @pytest.mark.fast

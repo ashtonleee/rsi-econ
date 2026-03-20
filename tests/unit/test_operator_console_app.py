@@ -356,11 +356,11 @@ def test_home_renders_status_active_launch_and_links(tmp_path: Path):
         response = client.get("/")
 
     assert response.status_code == 200
-    assert "Start Agent" in response.text
-    assert "Active Launch" in response.text
+    assert "Start Work" in response.text
+    assert "Still Running: Launch" in response.text
     assert "launch-1" in response.text
-    assert "Latest Pending Proposal" in response.text
-    assert "browsing" in response.text
+    assert "Needs Action" in response.text
+    assert "Still Running" in response.text
     assert "Watch for a screenshot or the next step summary." in response.text
 
 
@@ -570,7 +570,8 @@ def test_launch_detail_and_api_render_timeline_and_proposals(tmp_path: Path):
         api_response = client.get("/api/launches/launch-1")
 
     assert html_response.status_code == 200
-    assert "Live Workspace" in html_response.text
+    assert "Results" in html_response.text
+    assert "Transcript" in html_response.text
     assert "EventSource" in html_response.text
     assert "id=\"live-preview-panel\"" in html_response.text
     assert "id=\"approval-banner\"" in html_response.text

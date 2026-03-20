@@ -43,7 +43,7 @@ def docker_env() -> dict[str, str]:
     env["COMPOSE_PROJECT_NAME"] = COMPOSE_PROJECT
     env["RSI_LLM_BUDGET_TOKEN_CAP"] = "200"
     env["RSI_WEB_ALLOWLIST_HOSTS"] = "allowed.test,allowed-two.test"
-    env["RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"] = "allowed.test,allowed-two.test"
+    env["RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"] = "allowed.test,allowed-two.test,blocked.test"
     env["RSI_ACTION_ALLOWLIST_HOSTS"] = "allowed.test"
     return env
 
@@ -717,6 +717,195 @@ def test_browser_submit_preview_blocks_targets_outside_action_allowlist(compose_
     assert proposal["status_code"] == 403
     assert proposal["json"]["reason"] == "host_not_in_action_allowlist"
     assert proposal["json"]["host"] == "allowed-two.test"
+
+
+def test_public_workflow_browser_session_supports_tabs_history_and_approval_gated_fetch(compose_stack):
+    opened = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/sessions/open",
+        env=compose_stack,
+        payload={
+            "url": "http://blocked.test/browser/public-workflow-start",
+            "capability_profile": "workflow_browser_public",
+        },
+        headers=agent_auth_headers(),
+    )
+    assert opened["status_code"] == 200
+    snapshot = opened["json"]
+    assert snapshot["capability_profile"] == "workflow_browser_public"
+    assert snapshot["current_url"] == "http://blocked.test/browser/public-workflow-start"
+    assert snapshot["page_title"] == "Public workflow start fixture"
+    assert snapshot["active_tab_id"]
+    assert len(snapshot["tabs"]) == 1
+
+    navigate = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/navigate",
+        env=compose_stack,
+        payload={
+            "snapshot_id": snapshot["snapshot_id"],
+            "url": "http://blocked.test/browser/public-workflow-step",
+        },
+        headers=agent_auth_headers(),
+    )
+    assert navigate["status_code"] == 200
+    navigate_body = navigate["json"]
+    assert navigate_body["outcome"] == "snapshot"
+    step_snapshot = navigate_body["snapshot"]
+    assert step_snapshot["current_url"] == "http://blocked.test/browser/public-workflow-step"
+    assert step_snapshot["page_title"] == "Public workflow step fixture"
+    first_tab_id = step_snapshot["active_tab_id"]
+
+    back = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/back",
+        env=compose_stack,
+        payload={"snapshot_id": step_snapshot["snapshot_id"]},
+        headers=agent_auth_headers(),
+    )
+    assert back["status_code"] == 200
+    back_snapshot = back["json"]["snapshot"]
+    assert back_snapshot["current_url"] == "http://blocked.test/browser/public-workflow-start"
+
+    forward = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/forward",
+        env=compose_stack,
+        payload={"snapshot_id": back_snapshot["snapshot_id"]},
+        headers=agent_auth_headers(),
+    )
+    assert forward["status_code"] == 200
+    step_snapshot = forward["json"]["snapshot"]
+    assert step_snapshot["current_url"] == "http://blocked.test/browser/public-workflow-step"
+
+    new_tab = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/tabs/new",
+        env=compose_stack,
+        payload={"url": "http://allowed.test/browser/interactive-help"},
+        headers=agent_auth_headers(),
+    )
+    assert new_tab["status_code"] == 200
+    new_tab_snapshot = new_tab["json"]["snapshot"]
+    assert new_tab_snapshot["current_url"] == "http://allowed.test/browser/interactive-help"
+    assert new_tab_snapshot["page_title"] == "Interactive help fixture"
+    assert len(new_tab_snapshot["tabs"]) == 2
+    assert new_tab_snapshot["active_tab_id"] != first_tab_id
+
+    switched = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/tabs/switch",
+        env=compose_stack,
+        payload={
+            "snapshot_id": new_tab_snapshot["snapshot_id"],
+            "tab_id": first_tab_id,
+        },
+        headers=agent_auth_headers(),
+    )
+    assert switched["status_code"] == 200
+    step_snapshot = switched["json"]["snapshot"]
+    assert step_snapshot["current_url"] == "http://blocked.test/browser/public-workflow-step"
+    assert step_snapshot["active_tab_id"] == first_tab_id
+
+    email_field = find_interactable(step_snapshot, kind="text_input", name="email")
+    filled = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/fill",
+        env=compose_stack,
+        payload={
+            "snapshot_id": step_snapshot["snapshot_id"],
+            "element_id": email_field["element_id"],
+            "text": "alice@example.com",
+        },
+        headers=agent_auth_headers(),
+    )
+    assert filled["status_code"] == 200
+    filled_body = filled["json"]
+    assert filled_body["outcome"] == "snapshot"
+    filled_snapshot = filled_body["snapshot"]
+    assert find_interactable(filled_snapshot, kind="text_input", name="email")["value_preview"] == "alice@example.com"
+
+    send_button = find_interactable(
+        filled_snapshot,
+        kind="button",
+        text="Send public workflow request",
+    )
+    request_pause = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/actions/click",
+        env=compose_stack,
+        payload={
+            "snapshot_id": filled_snapshot["snapshot_id"],
+            "element_id": send_button["element_id"],
+        },
+        headers=agent_auth_headers(),
+    )
+    assert request_pause["status_code"] == 200
+    request_pause_body = request_pause["json"]
+    assert request_pause_body["outcome"] == "proposal_required"
+    assert request_pause_body["proposal_preview"]["target_url"] == "http://blocked.test/browser/public-workflow-result"
+    assert request_pause_body["proposal_preview"]["method"] == "POST"
+    assert request_pause_body["proposal"]["action_type"] == "browser_http_request"
+    assert request_pause_body["proposal"]["status"] == "pending"
+    proposal_id = request_pause_body["proposal"]["proposal_id"]
+
+    decide = compose_http_response(
+        "bridge",
+        "POST",
+        f"http://127.0.0.1:8000/proposals/{proposal_id}/decide",
+        env=compose_stack,
+        payload={"decision": "approve", "reason": "public workflow browser compose test"},
+        headers=operator_auth_headers(),
+    )
+    assert decide["status_code"] == 200
+    assert decide["json"]["status"] == "approved"
+
+    execute = compose_http_response(
+        "bridge",
+        "POST",
+        f"http://127.0.0.1:8000/proposals/{proposal_id}/execute",
+        env=compose_stack,
+        headers=operator_auth_headers(),
+    )
+    assert execute["status_code"] == 200
+    execute_body = execute["json"]
+    assert execute_body["status"] == "executed"
+    result = execute_body["execution_result"]
+    assert result["method"] == "POST"
+    assert result["target_url"] == "http://blocked.test/browser/public-workflow-result"
+    assert result["session_id"] == snapshot["session_id"]
+    assert result["snapshot_id"]
+
+    post_execute_snapshot = compose_http_response(
+        "agent",
+        "GET",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}",
+        env=compose_stack,
+        headers=agent_auth_headers(),
+    )
+    assert post_execute_snapshot["status_code"] == 200
+    final_snapshot = post_execute_snapshot["json"]
+    assert final_snapshot["current_url"] == "http://blocked.test/browser/public-workflow-step"
+    assert "Workflow submitted for alice@example.com from /browser/public-workflow-step." in final_snapshot["rendered_text"]
+    assert final_snapshot["pending_request_preview"] is None
+
+    events = load_events()
+    event_types = [event["event_type"] for event in events]
+    assert "browser_session_navigate" in event_types
+    assert "browser_session_back" in event_types
+    assert "browser_session_forward" in event_types
+    assert "browser_session_new_tab" in event_types
+    assert "browser_session_switch_tab" in event_types
+    assert "browser_http_request_proposal_created" in event_types
+    assert "proposal_executed" in event_types
 
 
 def test_seed_runner_browser_demo_writes_artifacts_and_recovery_resets_them(compose_stack):

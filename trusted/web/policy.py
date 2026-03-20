@@ -33,6 +33,7 @@ class WebPolicy:
     private_test_hosts: tuple[str, ...]
     max_redirects: int
     timeout_seconds: float
+    allow_public_hosts: bool = False
     allowed_content_types: tuple[str, ...] = ()
     max_response_bytes: int = 0
     max_preview_chars: int = 0
@@ -97,7 +98,7 @@ def normalize_web_target(raw_url: str, policy: WebPolicy) -> NormalizedWebTarget
     host = parts.hostname.lower()
     if _is_blocked_hostname(host):
         raise WebPolicyError("blocked_hostname", host)
-    if host not in policy.allowlist_hosts:
+    if not policy.allow_public_hosts and host not in policy.allowlist_hosts:
         raise WebPolicyError("host_not_allowlisted", host)
 
     default_port = _default_port_for(scheme)

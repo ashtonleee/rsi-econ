@@ -1,3 +1,5 @@
+import json
+
 from shared.schemas import ChatMessage, ChatUsage
 
 
@@ -8,6 +10,19 @@ def count_tokens(messages: list[ChatMessage]) -> int:
 def deterministic_reply(messages: list[ChatMessage]) -> str:
     for message in reversed(messages):
         if message.role == "user":
+            try:
+                prompt = json.loads(message.content)
+            except (TypeError, json.JSONDecodeError):
+                prompt = None
+            if isinstance(prompt, dict) and "allowed_tools" in prompt:
+                return json.dumps(
+                    {
+                        "tool": "bridge_status",
+                        "reason": "deterministic mock session action",
+                        "params": {},
+                    },
+                    sort_keys=True,
+                )
             return f"stage1 deterministic reply: {message.content}"
     return "stage1 deterministic reply: no user message provided"
 

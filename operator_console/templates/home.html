@@ -12,8 +12,8 @@
   <section class="panel">
     <div class="hero">
       <div>
-        <h2 style="margin-bottom: 0.35rem;">Start Agent</h2>
-        <div class="muted">Launch a seeded task, then watch its step timeline and approval state from the console.</div>
+        <h2 style="margin-bottom: 0.35rem;">Start Work</h2>
+        <div class="muted">Launch a seeded run or a freeform session, then follow its results, actions, and observable transcript from the console.</div>
       </div>
       <div class="inline-actions">
         <a class="button primary" href="/launches">Open Launch Control</a>
@@ -82,7 +82,7 @@
     </article>
 
     <article class="panel">
-      <h2>Operator Loop</h2>
+      <h2>Results, Actions, And Activity</h2>
       <div class="meta-list">
         <div class="meta-row">
           <dt>Bridge URL</dt>
@@ -102,28 +102,28 @@
         {% if active_launch and active_snapshot %}
           <a class="artifact-card {% if active_snapshot.phase_label == 'waiting_for_approval' %}artifact-card-emphasis{% endif %}" href="/launches/{{ active_launch.launch_id }}">
             <div>
-              <strong>Active Launch</strong>
+              <strong>Still Running: Launch</strong>
               <div><code>{{ active_launch.launch_id }}</code></div>
               <div class="muted">{{ active_launch.task }}</div>
               <div style="margin-top: 0.55rem;">
-                <span class="pill {{ active_snapshot.phase_tone }}">{{ active_snapshot.phase_label.replace("_", " ") }}</span>
+                <span class="pill {{ active_snapshot.phase_tone }}">{{ "Needs Action" if active_snapshot.phase_label == "waiting_for_approval" else "Still Running" if active_snapshot.phase_label in ["starting", "browsing", "answering"] else active_snapshot.phase_label.replace("_", " ") }}</span>
               </div>
               <div style="margin-top: 0.55rem;">{{ active_snapshot.headline }}</div>
               <div class="muted" style="margin-top: 0.35rem;">{{ active_snapshot.next_action }}</div>
             </div>
             <div>
-              <span class="pill {{ active_snapshot.phase_tone }}">{{ active_launch.status }}</span>
+              <span class="pill {{ active_snapshot.phase_tone }}">{{ "Needs Action" if active_snapshot.phase_label == "waiting_for_approval" else "Still Running" }}</span>
             </div>
           </a>
         {% elif active_launch %}
           <a class="artifact-card" href="/launches/{{ active_launch.launch_id }}">
             <div>
-              <strong>Active Launch</strong>
+              <strong>Still Running: Launch</strong>
               <div><code>{{ active_launch.launch_id }}</code></div>
               <div class="muted">{{ active_launch.task }}</div>
             </div>
             <div>
-              <span class="pill warn">{{ active_launch.status }}</span>
+              <span class="pill warn">Still Running</span>
             </div>
           </a>
         {% else %}
@@ -133,17 +133,17 @@
         {% if active_session and active_session_snapshot %}
           <a class="artifact-card {% if active_session_snapshot.phase_label == 'waiting_for_approval' %}artifact-card-emphasis{% endif %}" href="/sessions/{{ active_session.session_id }}">
             <div>
-              <strong>Active Session</strong>
+              <strong>Still Running: Session</strong>
               <div><code>{{ active_session.session_id }}</code></div>
               <div class="muted">{{ active_session.task }}</div>
               <div style="margin-top: 0.55rem;">
-                <span class="pill {{ active_session_snapshot.phase_tone }}">{{ active_session_snapshot.phase_label.replace("_", " ") }}</span>
+                <span class="pill {{ active_session_snapshot.phase_tone }}">{{ "Needs Action" if active_session_snapshot.phase_label == "waiting_for_approval" else "Still Running" if active_session.status in ["starting", "running", "resuming"] else active_session_snapshot.phase_label.replace("_", " ") }}</span>
               </div>
               <div style="margin-top: 0.55rem;">{{ active_session_snapshot.headline }}</div>
               <div class="muted" style="margin-top: 0.35rem;">{{ active_session_snapshot.next_action }}</div>
             </div>
             <div>
-              <span class="pill {{ active_session_snapshot.phase_tone }}">{{ active_session.status }}</span>
+              <span class="pill {{ active_session_snapshot.phase_tone }}">{{ "Needs Action" if active_session_snapshot.phase_label == "waiting_for_approval" else "Still Running" }}</span>
             </div>
           </a>
         {% elif not active_launch %}
@@ -153,12 +153,12 @@
         {% if latest_run %}
           <a class="artifact-card" href="/runs/{{ latest_run.name }}">
             <div>
-              <strong>Latest Run</strong>
+              <strong>Latest Result</strong>
               <div>{{ latest_run.name }}</div>
               <div class="muted">{{ latest_run.task }}</div>
             </div>
             <div>
-              <span class="pill {{ 'ok' if latest_run.success else 'warn' }}">{{ latest_run.finished_reason or "unknown" }}</span>
+              <span class="pill {{ 'ok' if latest_run.success else 'warn' }}">{{ "Latest Result" if latest_run.success else (latest_run.finished_reason or "unknown") }}</span>
             </div>
           </a>
         {% else %}
@@ -168,7 +168,7 @@
         {% if latest_pending %}
           <a class="artifact-card" href="/proposals/{{ latest_pending.proposal_id }}">
             <div>
-              <strong>Latest Pending Proposal</strong>
+              <strong>Needs Action</strong>
               <div><code>{{ latest_pending.proposal_id }}</code></div>
               <div class="muted">{{ latest_pending.action_type }}</div>
             </div>

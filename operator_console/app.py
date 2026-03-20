@@ -253,6 +253,7 @@ def create_app(
             session_request = SessionCreateRequest(
                 task=form.get("task", "").strip(),
                 launch_mode=form.get("launch_mode", "default").strip(),  # type: ignore[arg-type]
+                capability_profile=form.get("capability_profile", "bounded_packet").strip(),  # type: ignore[arg-type]
                 model=form.get("model", "").strip(),
                 input_url=form.get("input_url", "").strip(),
                 proposal_target_url=form.get("proposal_target_url", "").strip(),

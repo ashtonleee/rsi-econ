@@ -6,7 +6,12 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from shared.schemas import BrowserSubmitExecuteRequest, EgressFetchRequest, ProposalRecord
+from shared.schemas import (
+    BrowserHttpRequestExecuteRequest,
+    BrowserSubmitExecuteRequest,
+    EgressFetchRequest,
+    ProposalRecord,
+)
 from trusted.bridge.clients import TrustedBridgeClients
 
 
@@ -37,6 +42,11 @@ async def execute_proposal(
             proposal,
             clients=clients,
             action_allowlist_hosts=action_allowlist_hosts,
+        )
+    if proposal.action_type == "browser_http_request":
+        return await _execute_browser_http_request(
+            proposal,
+            clients=clients,
         )
     return {"error": f"unsupported action_type: {proposal.action_type}"}
 
@@ -201,6 +211,69 @@ async def _execute_browser_submit(
         "target_url": target_url,
         "method": method or execute_result.method,
         "field_preview": field_preview if isinstance(field_preview, list) else [],
+        "current_url": snapshot.current_url,
+        "http_status": snapshot.http_status,
+        "page_title": snapshot.page_title,
+        "meta_description": snapshot.meta_description,
+        "rendered_text_sha256": snapshot.rendered_text_sha256,
+        "text_bytes": snapshot.text_bytes,
+        "text_truncated": snapshot.text_truncated,
+        "screenshot_sha256": snapshot.screenshot_sha256,
+        "screenshot_bytes": snapshot.screenshot_bytes,
+        "session_id": execute_result.session_id,
+        "snapshot_id": snapshot.snapshot_id,
+    }
+
+
+async def _execute_browser_http_request(
+    proposal: ProposalRecord,
+    *,
+    clients: TrustedBridgeClients,
+) -> dict[str, Any]:
+    payload = proposal.action_payload
+    session_id = str(payload.get("session_id", "")).strip()
+    request_id = str(payload.get("request_id", "")).strip()
+    target_url = str(payload.get("target_url", "")).strip()
+    method = str(payload.get("method", "")).strip().upper() or "POST"
+
+    if not session_id:
+        return {"error": "action_payload.session_id is required"}
+    if not request_id:
+        return {"error": "action_payload.request_id is required"}
+    if not target_url:
+        return {"error": "action_payload.target_url is required"}
+
+    try:
+        execute_result = await clients.browser_execute_http_request(
+            session_id,
+            BrowserHttpRequestExecuteRequest(request_id=request_id),
+        )
+    except httpx.HTTPStatusError as exc:
+        detail = {}
+        try:
+            detail = exc.response.json()
+        except Exception:
+            pass
+        reason = ""
+        if isinstance(detail, dict):
+            nested = detail.get("detail") if isinstance(detail.get("detail"), dict) else detail
+            if isinstance(nested, dict):
+                reason = str(nested.get("reason", "")).strip()
+        if reason in {"browser_session_missing", "browser_pending_request_missing", "browser_snapshot_stale"}:
+            return {"error": reason, "detail": detail}
+        return {
+            "error": "browser_http_request_denied",
+            "browser_status": exc.response.status_code,
+            "detail": detail,
+        }
+    except httpx.HTTPError as exc:
+        return {"error": f"browser_unreachable: {type(exc).__name__}: {exc}"}
+
+    snapshot = execute_result.snapshot
+    return {
+        "request_id": execute_result.request_id,
+        "target_url": execute_result.target_url,
+        "method": execute_result.method or method,
         "current_url": snapshot.current_url,
         "http_status": snapshot.http_status,
         "page_title": snapshot.page_title,

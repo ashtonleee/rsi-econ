@@ -10,4 +10,5 @@ runtime/trusted_state/logs/*.jsonl
 runtime/trusted_state/state/
 runtime/trusted_state/checkpoints/
 runtime/operator_console/
+runtime/post_task_updates/
 untrusted/agent_workspace/sessions/
