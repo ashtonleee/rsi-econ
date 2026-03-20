@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="grid two">
+    <article class="panel">
+      <div class="hero">
+        <div>
+          <h2 style="margin-bottom: 0.35rem;">Start Agent</h2>
+          <div class="muted">This launch surface shells into the existing seed runner. One live launch at a time.</div>
+        </div>
+        {% if active_launch %}
+          <a class="button warn" href="/launches/{{ active_launch.launch_id }}">View Active Launch</a>
+        {% endif %}
+      </div>
+
+      {% if active_launch %}
+        <div class="callout" style="margin-top: 1rem;">
+          <strong>Another launch is running.</strong>
+          <div><code>{{ active_launch.launch_id }}</code> is still {{ active_launch.status }}. New launches stay blocked until it finishes.</div>
+        </div>
+      {% endif %}
+
+      <form method="post" action="/launches" style="margin-top: 1rem;">
+        <div class="form-grid">
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="task">Task</label>
+            <textarea id="task" name="task" required placeholder="Read a real page, write a brief, and request approval to post a summary"></textarea>
+          </div>
+
+          <div class="field">
+            <label for="script">Script</label>
+            <select id="script" name="script" required>
+              {% for script in launch_plans %}
+                <option value="{{ script }}">{{ script }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="launch_mode">Launch mode</label>
+            <select id="launch_mode" name="launch_mode">
+              <option value="default">default</option>
+              <option value="provider">provider</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="model">Model (provider mode)</label>
+            <input id="model" name="model" type="text" placeholder="openai/gpt-4.1-mini">
+          </div>
+
+          <div class="field">
+            <label for="input_url">Input URL</label>
+            <input id="input_url" name="input_url" type="url" placeholder="https://httpbin.org/html">
+          </div>
+
+          <div class="field">
+            <label for="follow_target_url">Follow target URL</label>
+            <input id="follow_target_url" name="follow_target_url" type="url" placeholder="https://example.com/next">
+          </div>
+
+          <div class="field">
+            <label for="proposal_target_url">Proposal target URL</label>
+            <input id="proposal_target_url" name="proposal_target_url" type="url" placeholder="https://httpbin.org/post">
+          </div>
+
+          <div class="field">
+            <label for="max_steps">Max steps</label>
+            <input id="max_steps" name="max_steps" type="number" min="1" value="8">
+          </div>
+        </div>
+
+        <div class="inline-actions" style="margin-top: 1rem;">
+          <button class="primary" type="submit" {% if active_launch %}disabled{% endif %}>Start Agent</button>
+          <span class="muted">Provider mode goes through <code>scripts/provider.sh</code>; default mode shells directly into the current agent container.</span>
+        </div>
+      </form>
+    </article>
+
+    <article class="panel">
+      <h2>Launch Notes</h2>
+      <div class="meta-list">
+        <div class="meta-row">
+          <dt>Runtime dir</dt>
+          <dd><code>{{ request.app.state.settings.operator_runtime_dir }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Workspace plans</dt>
+          <dd>{{ launch_plans | length }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Bridge token</dt>
+          <dd>{{ "present" if request.app.state.settings.operator_token else "missing" }}</dd>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <h2>Recent Launches</h2>
+    {% if launches %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Launch</th>
+              <th>Created</th>
+              <th>Task</th>
+              <th>Mode</th>
+              <th>Status</th>
+              <th>Run</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for launch in launches %}
+              <tr>
+                <td><a href="/launches/{{ launch.launch_id }}"><code>{{ launch.launch_id }}</code></a></td>
+                <td>{{ launch.created_at }}</td>
+                <td>{{ launch.task }}</td>
+                <td>{{ launch.launch_mode }}{% if launch.model %}<div class="muted">{{ launch.model }}</div>{% endif %}</td>
+                <td>
+                  <span class="pill {% if launch.status in ['running', 'starting'] %}warn{% elif launch.status == 'finished' %}ok{% else %}bad{% endif %}">
+                    {{ launch.status }}
+                  </span>
+                  {% if launch.error %}
+                    <div class="muted">{{ launch.error }}</div>
+                  {% endif %}
+                </td>
+                <td><code>{{ launch.run_id or "pending" }}</code></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty">No launches recorded yet. Start a seeded run above.</div>
+    {% endif %}
+  </section>
+{% endblock %}

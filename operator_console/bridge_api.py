@@ -40,36 +40,71 @@ class BridgeAPI:
         self.command_runner = command_runner or subprocess.run
 
     async def get_status(self) -> BridgeStatusReport:
-        payload = await self._get_json("/status")
+        payload = await self._request_json("GET", "/status")
         return BridgeStatusReport.model_validate(payload)
 
     async def list_proposals(self, *, status: str | None = None) -> list[ProposalRecord]:
         params = {"status": status} if status else None
-        payload = await self._get_json("/proposals", params=params)
+        payload = await self._request_json("GET", "/proposals", params=params)
         response = ProposalListResponse.model_validate(payload)
         return sorted(response.proposals, key=lambda record: record.created_at, reverse=True)
 
     async def get_proposal(self, proposal_id: str) -> ProposalRecord:
-        payload = await self._get_json(f"/proposals/{proposal_id}")
+        payload = await self._request_json("GET", f"/proposals/{proposal_id}")
         return ProposalRecord.model_validate(payload)
 
-    async def _get_json(self, path: str, *, params: dict[str, str] | None = None) -> dict:
+    async def decide_proposal(
+        self,
+        proposal_id: str,
+        *,
+        decision: str,
+        reason: str,
+    ) -> ProposalRecord:
+        payload = await self._request_json(
+            "POST",
+            f"/proposals/{proposal_id}/decide",
+            payload={"decision": decision, "reason": reason},
+        )
+        return ProposalRecord.model_validate(payload)
+
+    async def execute_proposal(self, proposal_id: str) -> ProposalRecord:
+        payload = await self._request_json(
+            "POST",
+            f"/proposals/{proposal_id}/execute",
+        )
+        return ProposalRecord.model_validate(payload)
+
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        payload: dict | None = None,
+    ) -> dict:
         if not self.operator_token:
             raise BridgeUnavailableError("RSI_OPERATOR_TOKEN is not set")
 
         try:
-            return await self._http_get_json(path, params=params)
+            return await self._http_request_json(method, path, params=params, payload=payload)
         except BridgeUnavailableError as exc:
             if self.transport is not None or not _may_use_compose_exec(self.base_url):
                 raise exc
             try:
-                return self._compose_exec_get_json(path, params=params)
+                return self._compose_exec_request_json(method, path, params=params, payload=payload)
             except BridgeUnavailableError as fallback_exc:
                 raise BridgeUnavailableError(
                     f"{exc}; docker compose bridge fallback failed: {fallback_exc}"
                 ) from fallback_exc
 
-    async def _http_get_json(self, path: str, *, params: dict[str, str] | None = None) -> dict:
+    async def _http_request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        payload: dict | None = None,
+    ) -> dict:
         headers = {"Authorization": f"Bearer {self.operator_token}"}
         async with httpx.AsyncClient(
             base_url=self.base_url,
@@ -78,7 +113,7 @@ class BridgeAPI:
             transport=self.transport,
         ) as client:
             try:
-                response = await client.get(path, params=params)
+                response = await client.request(method, path, params=params, json=payload)
             except httpx.RequestError as exc:
                 raise BridgeUnavailableError(f"bridge unavailable: {exc}") from exc
 
@@ -97,7 +132,14 @@ class BridgeAPI:
         except json.JSONDecodeError as exc:
             raise BridgeAPIError("bridge returned invalid JSON") from exc
 
-    def _compose_exec_get_json(self, path: str, *, params: dict[str, str] | None = None) -> dict:
+    def _compose_exec_request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        payload: dict | None = None,
+    ) -> dict:
         full_url = f"{self.base_url}{path}"
         if params:
             full_url = f"{full_url}?{urlencode(params)}"
@@ -105,11 +147,13 @@ class BridgeAPI:
         code = (
             "import json\n"
             "import httpx\n"
+            f"method = {method!r}\n"
             f"url = {full_url!r}\n"
             f"headers = {json.dumps({'Authorization': f'Bearer {self.operator_token}'})!r}\n"
+            f"payload = {json.dumps(payload or {})!r}\n"
             f"timeout = {self.timeout_seconds!r}\n"
             "with httpx.Client(timeout=timeout) as client:\n"
-            "    response = client.get(url, headers=json.loads(headers))\n"
+            "    response = client.request(method, url, headers=json.loads(headers), json=json.loads(payload) if payload != '{}' else None)\n"
             "try:\n"
             "    body = response.json()\n"
             "except Exception:\n"

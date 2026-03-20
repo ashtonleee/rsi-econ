@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block content %}
+  {% set launch = snapshot.launch %}
+  <section class="grid two">
+    <article class="panel">
+      <div class="hero">
+        <div>
+          <h2 style="margin-bottom: 0.35rem;">Live Launch</h2>
+          <div class="muted">Polling every 2.5 seconds while the launch is active.</div>
+        </div>
+        <div class="inline-actions">
+          <span class="pill {% if launch.status in ['running', 'starting'] %}warn{% elif launch.status == 'finished' %}ok{% else %}bad{% endif %}">{{ launch.status }}</span>
+          {% if snapshot.summary_url %}
+            <a class="button" href="{{ snapshot.summary_url }}">Open Final Run JSON</a>
+          {% endif %}
+        </div>
+      </div>
+
+      <dl class="meta-list" style="margin-top: 1rem;">
+        <div class="meta-row">
+          <dt>Launch ID</dt>
+          <dd><code>{{ launch.launch_id }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Task</dt>
+          <dd>{{ launch.task }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Script</dt>
+          <dd><code>{{ launch.script }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Mode</dt>
+          <dd>{{ launch.launch_mode }}{% if launch.model %} / <code>{{ launch.model }}</code>{% endif %}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Run ID</dt>
+          <dd><code>{{ launch.run_id or "waiting for run_start" }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Summary path</dt>
+          <dd><code>{{ launch.summary_path or "not written yet" }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Targets</dt>
+          <dd>
+            <div><strong>input:</strong> {{ launch.input_url or "n/a" }}</div>
+            <div><strong>follow:</strong> {{ launch.follow_target_url or "n/a" }}</div>
+            <div><strong>proposal:</strong> {{ launch.proposal_target_url or "n/a" }}</div>
+          </dd>
+        </div>
+      </dl>
+
+      {% if launch.error %}
+        <div class="callout error" style="margin-top: 1rem;">
+          <strong>Launch error</strong>
+          <div>{{ launch.error }}</div>
+        </div>
+      {% endif %}
+    </article>
+
+    <article class="panel">
+      <h2>Browser Preview</h2>
+      {% if snapshot.latest_screenshot %}
+        <a href="{{ snapshot.latest_screenshot.url }}">
+          <img class="preview" src="{{ snapshot.latest_screenshot.url }}" alt="{{ snapshot.latest_screenshot.name }}">
+        </a>
+        <div class="muted" style="margin-top: 0.65rem;">
+          Latest screenshot: <a href="{{ snapshot.latest_screenshot.url }}">{{ snapshot.latest_screenshot.name }}</a>
+        </div>
+      {% else %}
+        <div class="empty">No browser-facing screenshot has been found for this launch yet.</div>
+      {% endif %}
+
+      {% if related_proposals %}
+        <h3 style="margin-top: 1rem;">Approval State</h3>
+        {% for proposal in related_proposals %}
+          <div class="artifact-card" style="margin-bottom: 0.65rem;">
+            <div>
+              <strong><a href="/proposals/{{ proposal.proposal_id }}"><code>{{ proposal.proposal_id }}</code></a></strong>
+              <div class="muted">{{ proposal.action_type }}</div>
+            </div>
+            <div>
+              <span class="pill {% if proposal.status == 'pending' %}warn{% elif proposal.status == 'executed' %}ok{% else %}bad{% endif %}">{{ proposal.status }}</span>
+            </div>
+          </div>
+          {% if proposal.status == "pending" %}
+            <div class="callout" style="margin: 0 0 0.75rem;">
+              <strong>Pending approval needs operator action.</strong>
+              <div>This launch has reached an approval gate.</div>
+            </div>
+            <div class="grid two" style="margin-bottom: 1rem;">
+              <form method="post" action="/proposals/{{ proposal.proposal_id }}/approve">
+                <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
+                <div class="field">
+                  <label for="approve-{{ proposal.proposal_id }}">Approve reason</label>
+                  <textarea id="approve-{{ proposal.proposal_id }}" name="reason">approved from launch monitor</textarea>
+                </div>
+                <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
+              </form>
+              <form method="post" action="/proposals/{{ proposal.proposal_id }}/reject">
+                <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
+                <div class="field">
+                  <label for="reject-{{ proposal.proposal_id }}">Reject reason</label>
+                  <textarea id="reject-{{ proposal.proposal_id }}" name="reason"></textarea>
+                </div>
+                <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
+              </form>
+            </div>
+          {% elif proposal.status == "approved" %}
+            <form method="post" action="/proposals/{{ proposal.proposal_id }}/execute" style="margin-bottom: 1rem;">
+              <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
+              <button class="primary" type="submit">Execute</button>
+            </form>
+          {% endif %}
+        {% endfor %}
+      {% elif bridge_error %}
+        <div class="callout error" style="margin-top: 1rem;">
+          <strong>Proposal lookup unavailable.</strong>
+          <div>{{ bridge_error }}</div>
+        </div>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="grid two">
+    <article class="panel">
+      <h2>Step Timeline</h2>
+      {% if snapshot.timeline %}
+        <div class="timeline">
+          {% for event in snapshot.timeline %}
+            <article class="timeline-item">
+              <div class="timeline-head">
+                <div class="inline-actions">
+                  <span class="pill">{{ event.event_kind }}</span>
+                  {% if event.step_index is not none %}
+                    <span class="pill">step {{ event.step_index }}</span>
+                  {% endif %}
+                  {% if event.tool_name %}
+                    <span class="pill">{{ event.tool_name }}</span>
+                  {% endif %}
+                </div>
+                <div class="muted">{{ event.timestamp }}</div>
+              </div>
+              {% if event.summary %}
+                <pre>{{ event.summary | pretty_json }}</pre>
+              {% else %}
+                <div class="muted">No summary payload for this event.</div>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty">Timeline events will appear after the bridge records a matching <code>run_start</code>.</div>
+      {% endif %}
+    </article>
+
+    <article class="panel">
+      <h2>Artifacts And Logs</h2>
+      {% if snapshot.related_artifacts %}
+        <div class="artifact-list">
+          {% for artifact in snapshot.related_artifacts %}
+            <a class="artifact-card" href="{{ artifact.url }}">
+              <div>
+                <strong>{{ artifact.name }}</strong>
+                <div class="muted">{{ artifact.relative_path }}</div>
+              </div>
+              <div>
+                <span class="pill">{{ artifact.kind }}</span>
+                {% if artifact.modified_at %}
+                  <div class="muted">{{ artifact.modified_at }}</div>
+                {% endif %}
+              </div>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty">No matching artifacts have been linked yet.</div>
+      {% endif %}
+
+      <h3 style="margin-top: 1rem;">Launch Log Tail</h3>
+      {% if snapshot.log_tail %}
+        <pre>{{ snapshot.log_tail }}</pre>
+      {% else %}
+        <div class="empty">No launch log output yet.</div>
+      {% endif %}
+    </article>
+  </section>
+
+  {% if launch.status in ["starting", "running"] %}
+    <script>
+      (() => {
+        const currentVersion = {{ snapshot.version_token | tojson }};
+        const launchId = {{ launch.launch_id | tojson }};
+        async function poll() {
+          try {
+            const response = await fetch(`/api/launches/${launchId}`, { headers: { "Accept": "application/json" } });
+            if (!response.ok) {
+              return;
+            }
+            const payload = await response.json();
+            if (payload.version_token !== currentVersion) {
+              window.location.reload();
+            }
+          } catch (error) {
+          }
+        }
+        window.setInterval(poll, 2500);
+      })();
+    </script>
+  {% endif %}
+{% endblock %}
