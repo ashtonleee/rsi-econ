@@ -14,6 +14,8 @@ from operator_console.data import RepoData
 from operator_console.launches import LaunchBusyError, LaunchManager, LaunchRequest
 from operator_console.live_state import build_live_snapshot
 from operator_console.plan_catalog import build_launch_plan_options, default_launch_plan_name
+from operator_console.session_live_state import build_session_snapshot
+from operator_console.sessions import SessionBusyError, SessionCreateRequest, SessionManager
 
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -26,6 +28,7 @@ def create_app(
     bridge_api: BridgeAPI | None = None,
     repo_data: RepoData | None = None,
     launch_manager: LaunchManager | None = None,
+    session_manager: SessionManager | None = None,
 ) -> FastAPI:
     settings = settings or console_settings()
     bridge_api = bridge_api or BridgeAPI(
@@ -34,12 +37,14 @@ def create_app(
     )
     repo_data = repo_data or RepoData(settings)
     launch_manager = launch_manager or LaunchManager(settings, repo_data=repo_data)
+    session_manager = session_manager or SessionManager(settings, repo_data=repo_data)
 
     app = FastAPI(title="RSI Operator Console")
     app.state.settings = settings
     app.state.bridge_api = bridge_api
     app.state.repo_data = repo_data
     app.state.launch_manager = launch_manager
+    app.state.session_manager = session_manager
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.filters["pretty_json"] = lambda value: json.dumps(value, indent=2, sort_keys=True)
     templates.env.filters["tone"] = status_tone
@@ -74,6 +79,7 @@ def create_app(
         status = None
         latest_pending = None
         active_launch = launch_manager.get_active_launch()
+        active_session = session_manager.get_active_session()
         try:
             status = await bridge_api.get_status()
             pending = await bridge_api.list_proposals(status="pending")
@@ -92,6 +98,13 @@ def create_app(
                 bridge_error=bridge_error or proposal_error,
             )
 
+        active_session_snapshot = None
+        if active_session is not None:
+            try:
+                active_session_snapshot = session_manager.get_snapshot(active_session.session_id)
+            except FileNotFoundError:
+                active_session_snapshot = None
+
         runs = repo_data.list_run_summaries()
         latest_run = runs[0] if runs else None
         return render_page(
@@ -104,6 +117,8 @@ def create_app(
             latest_pending=latest_pending,
             active_launch=active_launch,
             active_snapshot=active_snapshot,
+            active_session=active_session,
+            active_session_snapshot=active_session_snapshot,
             run_count=len(runs),
         )
 
@@ -191,6 +206,110 @@ def create_app(
                 elif monotonic() >= next_heartbeat:
                     next_heartbeat = monotonic() + 15.0
                     yield sse_event("heartbeat", {"launch_id": launch_id})
+                    if once:
+                        break
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(
+            event_source(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/sessions", response_class=HTMLResponse)
+    async def sessions(request: Request) -> HTMLResponse:
+        sessions_list = session_manager.list_sessions()
+        grouped = {
+            "active": [item for item in sessions_list if item.status in {"starting", "running", "resuming"}],
+            "waiting": [item for item in sessions_list if item.status == "waiting_for_approval"],
+            "finished": [item for item in sessions_list if item.status == "finished"],
+            "failed": [item for item in sessions_list if item.status == "failed"],
+        }
+        return render_page(
+            request,
+            "sessions.html",
+            page_title="Sessions",
+            sessions=sessions_list,
+            grouped_sessions=grouped,
+            active_session=session_manager.get_active_session(),
+        )
+
+    @app.get("/sessions/new", response_class=HTMLResponse)
+    async def new_session(request: Request) -> HTMLResponse:
+        return render_page(
+            request,
+            "session_new.html",
+            page_title="Start Session",
+            active_session=session_manager.get_active_session(),
+        )
+
+    @app.post("/sessions")
+    async def create_session(request: Request) -> RedirectResponse:
+        form = await read_simple_form(request)
+        try:
+            session_request = SessionCreateRequest(
+                task=form.get("task", "").strip(),
+                launch_mode=form.get("launch_mode", "default").strip(),  # type: ignore[arg-type]
+                model=form.get("model", "").strip(),
+                input_url=form.get("input_url", "").strip(),
+                proposal_target_url=form.get("proposal_target_url", "").strip(),
+                max_turns_per_resume=max(1, int(form.get("max_turns_per_resume", "4").strip() or "4")),
+            )
+            session = session_manager.create_session(session_request)
+        except (AssertionError, SessionBusyError, ValueError) as exc:
+            return redirect_with_flash("/sessions/new", str(exc), level="error")
+        return redirect_with_flash(f"/sessions/{session.session_id}", "Session started.", level="ok")
+
+    @app.get("/sessions/{session_id}", response_class=HTMLResponse)
+    async def session_detail(request: Request, session_id: str) -> HTMLResponse:
+        try:
+            snapshot = await load_session_snapshot(session_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="session not found")
+        return render_page(
+            request,
+            "session_detail.html",
+            page_title=f"Session {session_id}",
+            snapshot=snapshot,
+        )
+
+    @app.get("/api/sessions/{session_id}")
+    async def session_snapshot(session_id: str) -> JSONResponse:
+        try:
+            snapshot = await load_session_snapshot(session_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="session not found")
+        return JSONResponse(snapshot)
+
+    @app.get("/api/sessions/{session_id}/stream")
+    async def session_stream(request: Request, session_id: str, once: int = 0) -> StreamingResponse:
+        try:
+            await load_session_snapshot(session_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="session not found")
+
+        async def event_source():
+            last_version = ""
+            next_heartbeat = monotonic() + 15.0
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    snapshot = await load_session_snapshot(session_id)
+                except FileNotFoundError:
+                    break
+                if snapshot["version_token"] != last_version:
+                    last_version = snapshot["version_token"]
+                    next_heartbeat = monotonic() + 15.0
+                    yield sse_event("snapshot", snapshot)
+                    if once:
+                        break
+                elif monotonic() >= next_heartbeat:
+                    next_heartbeat = monotonic() + 15.0
+                    yield sse_event("heartbeat", {"session_id": session_id})
                     if once:
                         break
                 await asyncio.sleep(1.0)
@@ -344,6 +463,21 @@ def create_app(
             bridge_error=status_error or proposal_error,
         )
 
+    async def load_session_snapshot(session_id: str) -> dict:
+        raw_snapshot = session_manager.get_snapshot(session_id)
+        status = None
+        status_error = ""
+        try:
+            status = await bridge_api.get_status()
+        except BridgeAPIError as exc:
+            status_error = str(exc)
+        allowlist_hosts = status.web.allowlist_hosts if status is not None else None
+        return build_session_snapshot(
+            raw_snapshot,
+            allowlist_hosts=allowlist_hosts,
+            bridge_error=status_error,
+        )
+
     async def proposal_action_redirect(
         request: Request,
         proposal_id: str,
@@ -355,12 +489,13 @@ def create_app(
         reason = form.get("reason", "").strip()
         try:
             if action == "execute":
-                await bridge_api.execute_proposal(proposal_id)
+                proposal = await bridge_api.execute_proposal(proposal_id)
                 message = "Proposal executed."
             else:
                 decision = "approve" if action == "approve" else "reject"
-                await bridge_api.decide_proposal(proposal_id, decision=decision, reason=reason)
+                proposal = await bridge_api.decide_proposal(proposal_id, decision=decision, reason=reason)
                 message = f"Proposal {decision}d."
+            session_manager.apply_proposal_update(proposal)
         except BridgeAPIError as exc:
             return redirect_with_flash(redirect_to, str(exc), level="error")
         return redirect_with_flash(redirect_to, message, level="ok")

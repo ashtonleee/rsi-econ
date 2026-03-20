@@ -8,7 +8,7 @@ from pathlib import Path
 from operator_console.config import ConsoleSettings
 
 
-ALLOWED_ARTIFACT_DIRS = ("research", "run_outputs")
+ALLOWED_ARTIFACT_DIRS = ("research", "run_outputs", "sessions")
 TEXT_SUFFIXES = {".json", ".log", ".txt", ".yaml", ".yml"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 

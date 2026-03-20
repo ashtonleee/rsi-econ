@@ -35,6 +35,7 @@ Usage:
   ./scripts/provider.sh up
   ./scripts/provider.sh smoke [--model MODEL] [--message MESSAGE]
   ./scripts/provider.sh seed-run --script SCRIPT --task TASK [--input-url URL] [--follow-target-url URL] [--proposal-target-url URL] [--model MODEL] [--max-steps N]
+  ./scripts/provider.sh session-run --session-id ID [--task TASK] [--input-url URL] [--proposal-target-url URL] [--model MODEL] [--max-turns-per-resume N] [--resume]
   ./scripts/provider.sh answer-packet --task TASK --input-url URL [--model MODEL] [--max-steps N]
   ./scripts/provider.sh follow-answer-packet --task TASK --input-url URL --follow-target-url URL [--model MODEL] [--max-steps N]
 
@@ -235,6 +236,100 @@ provider_seed_run() {
     "${cmd[@]}"
 }
 
+provider_session_run() {
+    load_provider_env
+    require_provider_key
+    export RSI_LITELLM_RESPONSE_MODE=provider_passthrough
+
+    local session_id=""
+    local task=""
+    local input_url=""
+    local proposal_target_url=""
+    local max_turns_per_resume=""
+    local launch_mode="provider"
+    local resume=0
+    local model
+    model="$(provider_seed_run_default_model)"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --session-id)
+                session_id="$2"
+                shift 2
+                ;;
+            --task)
+                task="$2"
+                shift 2
+                ;;
+            --input-url)
+                input_url="$2"
+                shift 2
+                ;;
+            --proposal-target-url)
+                proposal_target_url="$2"
+                shift 2
+                ;;
+            --launch-mode)
+                launch_mode="$2"
+                shift 2
+                ;;
+            --model)
+                model="$2"
+                shift 2
+                ;;
+            --max-turns-per-resume)
+                max_turns_per_resume="$2"
+                shift 2
+                ;;
+            --resume)
+                resume=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "unsupported argument: $1" >&2
+                usage >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z "$session_id" ]]; then
+        echo "--session-id is required for 'session-run'" >&2
+        exit 1
+    fi
+    if [[ $resume -eq 0 && -z "$task" ]]; then
+        echo "--task is required for 'session-run' unless --resume is set" >&2
+        exit 1
+    fi
+
+    local cmd=(
+        docker compose exec -T agent python -m untrusted.agent.session_runner
+        --session-id "$session_id"
+        --launch-mode "$launch_mode"
+        --model "$model"
+    )
+    if [[ $resume -eq 1 ]]; then
+        cmd+=(--resume)
+    else
+        cmd+=(--task "$task")
+    fi
+    if [[ -n "$input_url" ]]; then
+        cmd+=(--input-url "$input_url")
+    fi
+    if [[ -n "$proposal_target_url" ]]; then
+        cmd+=(--proposal-target-url "$proposal_target_url")
+    fi
+    if [[ -n "$max_turns_per_resume" ]]; then
+        cmd+=(--max-turns-per-resume "$max_turns_per_resume")
+    fi
+
+    "${cmd[@]}"
+}
+
 provider_answer_packet() {
     local model="${RSI_PROVIDER_ANSWER_MODEL:-gpt-4.1-mini}"
     local task=""
@@ -424,6 +519,10 @@ case "$command" in
     seed-run)
         shift
         provider_seed_run "$@"
+        ;;
+    session-run)
+        shift
+        provider_session_run "$@"
         ;;
     answer-packet)
         shift

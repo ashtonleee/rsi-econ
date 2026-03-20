@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <div class="hero">
+      <div>
+        <h2 style="margin-bottom: 0.35rem;">Sessions</h2>
+        <div class="muted">Persistent freeform agent sessions that can pause for approval and resume without losing context.</div>
+      </div>
+      <div class="inline-actions">
+        <a class="button primary" href="/sessions/new">Start Session</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid two">
+    <article class="panel">
+      <h2>Active And Waiting</h2>
+      <div class="artifact-list">
+        {% for session in grouped_sessions.active + grouped_sessions.waiting %}
+          <a class="artifact-card {% if session.status == 'waiting_for_approval' %}artifact-card-emphasis{% endif %}" href="/sessions/{{ session.session_id }}">
+            <div>
+              <strong>{{ session.session_id }}</strong>
+              <div class="muted">{{ session.task }}</div>
+              <div class="muted" style="margin-top: 0.35rem;">{{ session.input_url or "No input URL" }}</div>
+            </div>
+            <div>
+              <span class="pill {% if session.status == 'waiting_for_approval' %}warn{% elif session.status == 'failed' %}bad{% else %}ok{% endif %}">{{ session.status }}</span>
+            </div>
+          </a>
+        {% else %}
+          <div class="empty">No active or waiting sessions yet.</div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2>Finished And Failed</h2>
+      <div class="artifact-list">
+        {% for session in grouped_sessions.finished + grouped_sessions.failed %}
+          <a class="artifact-card" href="/sessions/{{ session.session_id }}">
+            <div>
+              <strong>{{ session.session_id }}</strong>
+              <div class="muted">{{ session.task }}</div>
+            </div>
+            <div>
+              <span class="pill {% if session.status == 'finished' %}ok{% else %}bad{% endif %}">{{ session.status }}</span>
+            </div>
+          </a>
+        {% else %}
+          <div class="empty">Completed sessions will appear here once you start using the freeform loop.</div>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+{% endblock %}

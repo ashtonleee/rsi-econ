@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 agent = [
     "pytest>=8.0,<9.0",
+    "trio>=0.30,<1.0",
 ]
 browser = [
     "playwright>=1.52,<2.0",
@@ -26,6 +27,7 @@ browser = [
 dev = [
     "pytest>=8.0,<9.0",
     "pyyaml>=6.0,<7.0",
+    "trio>=0.30,<1.0",
 ]
 
 [tool.pytest.ini_options]

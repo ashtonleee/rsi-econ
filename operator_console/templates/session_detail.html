@@ -1,0 +1,344 @@
+{% extends "base.html" %}
+{% block content %}
+  {% set session = snapshot.session %}
+  <section class="workspace-top">
+    <article class="panel preview-stage">
+      <div class="hero">
+        <div>
+          <h2 style="margin-bottom: 0.35rem;">Session Workspace</h2>
+          <div class="muted">Live transcript and browser packet view for the persistent session loop.</div>
+        </div>
+        <div class="inline-actions">
+          <span class="pill {{ snapshot.phase_tone }}">{{ snapshot.phase_label.replace("_", " ") }}</span>
+          {% if snapshot.summary_url %}
+            <a class="button" href="{{ snapshot.summary_url }}">Open Session Summary</a>
+          {% endif %}
+        </div>
+      </div>
+
+      <div id="session-preview-panel">
+        {% if snapshot.current_screenshot %}
+          <a href="{{ snapshot.current_screenshot.url }}">
+            <img class="preview preview-stage-image" src="{{ snapshot.current_screenshot.url }}" alt="{{ snapshot.current_screenshot.name }}">
+          </a>
+          <div class="preview-caption">
+            <strong>Current packet preview</strong>
+            <div class="muted">{{ snapshot.current_screenshot.name }}</div>
+          </div>
+        {% else %}
+          <div class="empty preview-empty">No browser screenshot has been written for this session yet.</div>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="panel status-stage" id="session-status-panel">
+      <div class="status-hero">
+        <div>
+          <div class="eyebrow">Current phase</div>
+          <h2 style="margin-bottom: 0.4rem;">{{ snapshot.headline }}</h2>
+        </div>
+        <span class="pill {{ snapshot.phase_tone }}">{{ session.status }}</span>
+      </div>
+
+      <div class="callout {% if snapshot.phase_tone == 'bad' %}error{% endif %}" style="margin-bottom: 1rem;">
+        <strong>Next action</strong>
+        <div>{{ snapshot.next_action }}</div>
+      </div>
+
+      <dl class="meta-list">
+        <div class="meta-row">
+          <dt>Session ID</dt>
+          <dd><code>{{ session.session_id }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Task</dt>
+          <dd>{{ session.task }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Mode</dt>
+          <dd>{{ session.launch_mode }}{% if session.model %} / <code>{{ session.model }}</code>{% endif %}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Input URL</dt>
+          <dd>{{ session.input_url or "n/a" }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Proposal target</dt>
+          <dd>{{ session.proposal_target_url or "n/a" }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Auto resume</dt>
+          <dd>{{ "enabled" if session.auto_resume_enabled else "disabled" }}</dd>
+        </div>
+      </dl>
+
+      <div class="diagnostic-list" id="session-diagnostic-list" style="margin-top: 1rem;">
+        {% if snapshot.diagnostics %}
+          {% for diagnostic in snapshot.diagnostics %}
+            <div class="diagnostic diagnostic-{{ diagnostic.severity }}">
+              <strong>{{ diagnostic.title }}</strong>
+              <div>{{ diagnostic.body }}</div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="empty">No active diagnostics.</div>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+
+  <section class="panel approval-banner" id="session-approval-banner">
+    {% set proposal = session.last_proposal_id %}
+    {% if proposal %}
+      <div class="approval-banner-head">
+        <div>
+          <div class="eyebrow">Approval state</div>
+          <h3 style="margin-bottom: 0.35rem;">Proposal <code>{{ proposal }}</code></h3>
+        </div>
+        <span class="pill {% if snapshot.phase_label == 'waiting_for_approval' %}warn{% else %}ok{% endif %}">{{ snapshot.phase_label.replace("_", " ") }}</span>
+      </div>
+      {% if session.status == "waiting_for_approval" %}
+        <div class="grid two">
+          <form method="post" action="/proposals/{{ proposal }}/approve">
+            <input type="hidden" name="redirect_to" value="/sessions/{{ session.session_id }}">
+            <div class="field">
+              <label for="approve-{{ proposal }}">Approve reason</label>
+              <textarea id="approve-{{ proposal }}" name="reason">approved from session workspace</textarea>
+            </div>
+            <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
+          </form>
+          <form method="post" action="/proposals/{{ proposal }}/reject">
+            <input type="hidden" name="redirect_to" value="/sessions/{{ session.session_id }}">
+            <div class="field">
+              <label for="reject-{{ proposal }}">Reject reason</label>
+              <textarea id="reject-{{ proposal }}" name="reason"></textarea>
+            </div>
+            <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
+          </form>
+        </div>
+      {% else %}
+        <form method="post" action="/proposals/{{ proposal }}/execute">
+          <input type="hidden" name="redirect_to" value="/sessions/{{ session.session_id }}">
+          <button class="primary" type="submit">Execute</button>
+        </form>
+      {% endif %}
+    {% else %}
+      <div class="empty">No proposal is attached to this session right now.</div>
+    {% endif %}
+  </section>
+
+  <section class="workspace-bottom">
+    <article class="panel">
+      <div class="hero">
+        <div>
+          <h2 style="margin-bottom: 0.35rem;">Transcript</h2>
+          <div class="muted">Plain-English summary first. Technical details stay immediately available.</div>
+        </div>
+      </div>
+      <div class="timeline" id="session-transcript">
+        {% if snapshot.transcript %}
+          {% for item in snapshot.transcript|reverse %}
+            <article class="timeline-item timeline-{{ item.tone }}">
+              <div class="timeline-head">
+                <div>
+                  <strong>{{ item.title }}</strong>
+                  <div class="muted">{{ item.summary_text }}</div>
+                </div>
+                <div class="inline-actions">
+                  {% if item.tool %}
+                    <span class="pill">{{ item.tool }}</span>
+                  {% endif %}
+                  <span class="pill {{ item.tone }}">{{ item.timestamp }}</span>
+                </div>
+              </div>
+              <details>
+                <summary>Technical details</summary>
+                <pre>{{ item | pretty_json }}</pre>
+              </details>
+            </article>
+          {% endfor %}
+        {% else %}
+          <div class="empty">The transcript will appear after the first model decision lands.</div>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2>Artifacts And Logs</h2>
+      <div class="artifact-list" id="session-artifacts">
+        {% if snapshot.related_artifacts %}
+          {% for artifact in snapshot.related_artifacts %}
+            <a class="artifact-card" href="{{ artifact.url }}">
+              <div>
+                <strong>{{ artifact.name }}</strong>
+                <div class="muted">{{ artifact.relative_path }}</div>
+              </div>
+              <div>
+                <span class="pill">{{ artifact.kind }}</span>
+                <div class="muted">{{ artifact.modified_at }}</div>
+              </div>
+            </a>
+          {% endfor %}
+        {% else %}
+          <div class="empty">No session artifacts have been written yet.</div>
+        {% endif %}
+      </div>
+      <h3 style="margin-top: 1rem;">Session Log Tail</h3>
+      <div id="session-log-tail">
+        {% if snapshot.log_tail %}
+          <pre>{{ snapshot.log_tail }}</pre>
+        {% else %}
+          <div class="empty">No session log output yet.</div>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+
+  <script id="session-snapshot" type="application/json">{{ snapshot | tojson }}</script>
+  <script>
+    (() => {
+      const sessionId = {{ session.session_id | tojson }};
+      const previewPanel = document.getElementById("session-preview-panel");
+      const transcriptPanel = document.getElementById("session-transcript");
+      const statusPanel = document.getElementById("session-status-panel");
+      const diagnosticPanel = document.getElementById("session-diagnostic-list");
+      const artifactPanel = document.getElementById("session-artifacts");
+      const logPanel = document.getElementById("session-log-tail");
+      const approvalPanel = document.getElementById("session-approval-banner");
+      let eventSource = null;
+      let fallbackPoll = null;
+      let sourceErrors = 0;
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function prettyJson(value) {
+        return escapeHtml(JSON.stringify(value ?? {}, null, 2));
+      }
+
+      function renderSnapshot(snapshot) {
+        if (snapshot.current_screenshot) {
+          previewPanel.innerHTML = `
+            <a href="${escapeHtml(snapshot.current_screenshot.url)}">
+              <img class="preview preview-stage-image" src="${escapeHtml(snapshot.current_screenshot.url)}" alt="${escapeHtml(snapshot.current_screenshot.name)}">
+            </a>
+            <div class="preview-caption">
+              <strong>Current packet preview</strong>
+              <div class="muted">${escapeHtml(snapshot.current_screenshot.name)}</div>
+            </div>
+          `;
+        } else {
+          previewPanel.innerHTML = '<div class="empty preview-empty">No browser screenshot has been written for this session yet.</div>';
+        }
+
+        statusPanel.innerHTML = `
+          <div class="status-hero">
+            <div>
+              <div class="eyebrow">Current phase</div>
+              <h2 style="margin-bottom: 0.4rem;">${escapeHtml(snapshot.headline)}</h2>
+            </div>
+            <span class="pill ${escapeHtml(snapshot.phase_tone)}">${escapeHtml(snapshot.session.status)}</span>
+          </div>
+          <div class="callout ${snapshot.phase_tone === "bad" ? "error" : ""}" style="margin-bottom: 1rem;">
+            <strong>Next action</strong>
+            <div>${escapeHtml(snapshot.next_action)}</div>
+          </div>
+          <dl class="meta-list">
+            <div class="meta-row"><dt>Session ID</dt><dd><code>${escapeHtml(snapshot.session.session_id)}</code></dd></div>
+            <div class="meta-row"><dt>Task</dt><dd>${escapeHtml(snapshot.session.task)}</dd></div>
+            <div class="meta-row"><dt>Mode</dt><dd>${escapeHtml(snapshot.session.launch_mode)}${snapshot.session.model ? ` / <code>${escapeHtml(snapshot.session.model)}</code>` : ""}</dd></div>
+            <div class="meta-row"><dt>Input URL</dt><dd>${escapeHtml(snapshot.session.input_url || "n/a")}</dd></div>
+            <div class="meta-row"><dt>Proposal target</dt><dd>${escapeHtml(snapshot.session.proposal_target_url || "n/a")}</dd></div>
+            <div class="meta-row"><dt>Auto resume</dt><dd>${snapshot.session.auto_resume_enabled ? "enabled" : "disabled"}</dd></div>
+          </dl>
+        `;
+
+        diagnosticPanel.innerHTML = (snapshot.diagnostics || []).length
+          ? (snapshot.diagnostics || []).map((item) => `
+              <div class="diagnostic diagnostic-${escapeHtml(item.severity)}">
+                <strong>${escapeHtml(item.title)}</strong>
+                <div>${escapeHtml(item.body)}</div>
+              </div>
+            `).join("")
+          : '<div class="empty">No active diagnostics.</div>';
+
+        transcriptPanel.innerHTML = (snapshot.transcript || []).length
+          ? [...snapshot.transcript].reverse().map((item) => `
+              <article class="timeline-item timeline-${escapeHtml(item.tone)}">
+                <div class="timeline-head">
+                  <div>
+                    <strong>${escapeHtml(item.title)}</strong>
+                    <div class="muted">${escapeHtml(item.summary_text)}</div>
+                  </div>
+                  <div class="inline-actions">
+                    ${item.tool ? `<span class="pill">${escapeHtml(item.tool)}</span>` : ""}
+                    <span class="pill ${escapeHtml(item.tone)}">${escapeHtml(item.timestamp || "")}</span>
+                  </div>
+                </div>
+                <details>
+                  <summary>Technical details</summary>
+                  <pre>${prettyJson(item)}</pre>
+                </details>
+              </article>
+            `).join("")
+          : '<div class="empty">The transcript will appear after the first model decision lands.</div>';
+
+        artifactPanel.innerHTML = (snapshot.related_artifacts || []).length
+          ? snapshot.related_artifacts.map((artifact) => `
+              <a class="artifact-card" href="${escapeHtml(artifact.url)}">
+                <div>
+                  <strong>${escapeHtml(artifact.name)}</strong>
+                  <div class="muted">${escapeHtml(artifact.relative_path)}</div>
+                </div>
+                <div>
+                  <span class="pill">${escapeHtml(artifact.kind)}</span>
+                  <div class="muted">${escapeHtml(artifact.modified_at || "")}</div>
+                </div>
+              </a>
+            `).join("")
+          : '<div class="empty">No session artifacts have been written yet.</div>';
+
+        logPanel.innerHTML = snapshot.log_tail
+          ? `<pre>${escapeHtml(snapshot.log_tail)}</pre>`
+          : '<div class="empty">No session log output yet.</div>';
+      }
+
+      function startFallbackPoll() {
+        if (fallbackPoll) return;
+        fallbackPoll = window.setInterval(async () => {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+          if (!response.ok) return;
+          renderSnapshot(await response.json());
+        }, 3000);
+      }
+
+      function startStream() {
+        if (!window.EventSource) {
+          startFallbackPoll();
+          return;
+        }
+        eventSource = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/stream`);
+        eventSource.addEventListener("snapshot", (event) => {
+          sourceErrors = 0;
+          renderSnapshot(JSON.parse(event.data));
+        });
+        eventSource.addEventListener("error", () => {
+          sourceErrors += 1;
+          if (sourceErrors >= 2) {
+            if (eventSource) eventSource.close();
+            startFallbackPoll();
+          }
+        });
+      }
+
+      renderSnapshot(JSON.parse(document.getElementById("session-snapshot").textContent));
+      startStream();
+    })();
+  </script>
+{% endblock %}

@@ -17,6 +17,7 @@
       </div>
       <div class="inline-actions">
         <a class="button primary" href="/launches">Open Launch Control</a>
+        <a class="button" href="/sessions/new">Start Session</a>
         {% if latest_pending %}
           <a class="button warn" href="/proposals/{{ latest_pending.proposal_id }}">Pending Approval</a>
         {% endif %}
@@ -127,6 +128,26 @@
           </a>
         {% else %}
           <div class="empty">No live launch is running right now. Use Launch Control to start a new seeded run.</div>
+        {% endif %}
+
+        {% if active_session and active_session_snapshot %}
+          <a class="artifact-card {% if active_session_snapshot.phase_label == 'waiting_for_approval' %}artifact-card-emphasis{% endif %}" href="/sessions/{{ active_session.session_id }}">
+            <div>
+              <strong>Active Session</strong>
+              <div><code>{{ active_session.session_id }}</code></div>
+              <div class="muted">{{ active_session.task }}</div>
+              <div style="margin-top: 0.55rem;">
+                <span class="pill {{ active_session_snapshot.phase_tone }}">{{ active_session_snapshot.phase_label.replace("_", " ") }}</span>
+              </div>
+              <div style="margin-top: 0.55rem;">{{ active_session_snapshot.headline }}</div>
+              <div class="muted" style="margin-top: 0.35rem;">{{ active_session_snapshot.next_action }}</div>
+            </div>
+            <div>
+              <span class="pill {{ active_session_snapshot.phase_tone }}">{{ active_session.status }}</span>
+            </div>
+          </a>
+        {% elif not active_launch %}
+          <div class="empty">No live session is running right now. Start one from the Sessions tab for a freeform tool loop.</div>
         {% endif %}
 
         {% if latest_run %}

@@ -561,11 +561,12 @@
       <header class="masthead">
         <div>
           <h1>RSI Operator Console</h1>
-          <p>Host-side operator surface for launching seeded runs, watching step-level progress, reviewing artifacts, and handling approval-gated actions.</p>
+          <p>Host-side operator surface for launching seeded runs, watching live sessions, reviewing artifacts, and handling approval-gated actions.</p>
         </div>
         <nav class="nav">
           <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">Home</a>
           <a href="/launches" class="{% if request.url.path.startswith('/launches') %}active{% endif %}">Launches</a>
+          <a href="/sessions" class="{% if request.url.path.startswith('/sessions') %}active{% endif %}">Sessions</a>
           <a href="/runs" class="{% if request.url.path.startswith('/runs') %}active{% endif %}">Runs</a>
           <a href="/proposals" class="{% if request.url.path.startswith('/proposals') %}active{% endif %}">Proposals</a>
         </nav>

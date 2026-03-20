@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <div class="hero">
+      <div>
+        <h2 style="margin-bottom: 0.35rem;">Start Session</h2>
+        <div class="muted">Create a freeform session that can browse allowlisted pages, write workspace artifacts, and pause for approval when it needs a consequential action.</div>
+      </div>
+    </div>
+  </section>
+
+  {% if active_session %}
+    <section class="panel">
+      <div class="callout">
+        <strong>Another session is active.</strong>
+        <div>Only one active session is allowed at a time. Finish or wait for <code>{{ active_session.session_id }}</code> before starting another.</div>
+      </div>
+    </section>
+  {% endif %}
+
+  <section class="panel">
+    <form method="post" action="/sessions">
+      <div class="form-grid">
+        <div class="field" style="grid-column: 1 / -1;">
+          <label for="task">Task</label>
+          <textarea id="task" name="task" required placeholder="Read this page and summarize it in one sentence."></textarea>
+        </div>
+        <div class="field">
+          <label for="launch_mode">Mode</label>
+          <select id="launch_mode" name="launch_mode">
+            <option value="default">default</option>
+            <option value="provider">provider</option>
+          </select>
+        </div>
+        <div class="field" data-provider-only="true" style="display: none;">
+          <label for="model">Model</label>
+          <input id="model" name="model" type="text" placeholder="openai/gpt-4.1-mini">
+        </div>
+        <div class="field">
+          <label for="input_url">Input URL</label>
+          <input id="input_url" name="input_url" type="url" placeholder="https://httpbin.org/html">
+        </div>
+        <div class="field">
+          <label for="proposal_target_url">Proposal target URL</label>
+          <input id="proposal_target_url" name="proposal_target_url" type="url" placeholder="https://httpbin.org/post">
+        </div>
+        <div class="field">
+          <label for="max_turns_per_resume">Max turns per resume</label>
+          <input id="max_turns_per_resume" name="max_turns_per_resume" type="number" min="1" value="4">
+        </div>
+      </div>
+      <div class="inline-actions" style="margin-top: 1rem;">
+        <button class="primary" type="submit" {% if active_session %}disabled{% endif %}>Start Session</button>
+        <a class="button" href="/sessions">Cancel</a>
+      </div>
+    </form>
+  </section>
+
+  <script>
+    (() => {
+      const mode = document.getElementById("launch_mode");
+      const providerOnly = [...document.querySelectorAll("[data-provider-only='true']")];
+      function syncMode() {
+        const provider = mode.value === "provider";
+        providerOnly.forEach((node) => {
+          node.style.display = provider ? "" : "none";
+        });
+      }
+      mode.addEventListener("change", syncMode);
+      syncMode();
+    })();
+  </script>
+{% endblock %}

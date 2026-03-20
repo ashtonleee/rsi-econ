@@ -51,6 +51,14 @@ class ConsoleSettings:
     def launch_logs_dir(self) -> Path:
         return self.operator_runtime_dir / "launch_logs"
 
+    @property
+    def sessions_dir(self) -> Path:
+        return self.operator_runtime_dir / "sessions"
+
+    @property
+    def session_logs_dir(self) -> Path:
+        return self.operator_runtime_dir / "session_logs"
+
 
 def console_settings() -> ConsoleSettings:
     raw_token = os.environ.get("RSI_OPERATOR_TOKEN", "").strip()
