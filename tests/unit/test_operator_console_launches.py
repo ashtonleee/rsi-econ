@@ -5,6 +5,7 @@ import pytest
 
 from operator_console.config import ConsoleSettings
 from operator_console.launches import LaunchBusyError, LaunchManager, LaunchRequest
+from operator_console.plan_catalog import build_launch_plan_options, default_launch_plan_name
 
 
 def make_settings(tmp_path: Path) -> ConsoleSettings:
@@ -39,7 +40,14 @@ def write_run_summary(settings: ConsoleSettings, run_id: str) -> None:
         "finished_reason": "planner_finished",
         "finish_summary": "done",
         "steps_executed": 2,
-        "steps": [],
+        "steps": [
+            {
+                "step_index": 1,
+                "kind": "write_binary_base64",
+                "params": {"path": "research/current_real_site_screenshot.png"},
+                "result": {"path": "research/current_real_site_screenshot.png", "bytes_written": 8},
+            }
+        ],
     }
     (settings.workspace_dir / "run_outputs" / f"{run_id}.json").write_text(
         json.dumps(payload),
@@ -72,6 +80,29 @@ def test_list_seed_plans_returns_sorted_json_names(tmp_path: Path):
     manager = LaunchManager(settings)
 
     assert manager.list_seed_plans() == ["a.json", "b.json"]
+
+
+@pytest.mark.fast
+def test_build_launch_plan_options_prefers_answer_packet_and_flags_required_fields():
+    options = build_launch_plan_options(
+        [
+            "stage3_local_task.json",
+            "stage8_real_site_approval_demo.json",
+            "stage6_answer_packet.json",
+            "stage6_browser_demo.json",
+        ]
+    )
+
+    assert [option.name for option in options] == [
+        "stage6_answer_packet.json",
+        "stage8_real_site_approval_demo.json",
+        "stage3_local_task.json",
+        "stage6_browser_demo.json",
+    ]
+    assert options[0].requires_input_url is True
+    assert options[0].requires_proposal_target_url is False
+    assert options[2].uses_fixed_urls is True
+    assert default_launch_plan_name([option.name for option in options]) == "stage6_answer_packet.json"
 
 
 @pytest.mark.fast

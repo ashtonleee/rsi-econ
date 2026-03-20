@@ -10,6 +10,7 @@ from operator_console.bridge_api import BridgeAPI, BridgeAPIError, BridgeNotFoun
 from operator_console.config import ConsoleSettings, console_settings
 from operator_console.data import RepoData
 from operator_console.launches import LaunchBusyError, LaunchManager, LaunchRequest
+from operator_console.plan_catalog import build_launch_plan_options, default_launch_plan_name
 
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -93,11 +94,13 @@ def create_app(
 
     @app.get("/launches", response_class=HTMLResponse)
     async def launches(request: Request) -> HTMLResponse:
+        plan_options = build_launch_plan_options(launch_manager.list_seed_plans())
         return render_page(
             request,
             "launches.html",
             page_title="Launches",
-            launch_plans=launch_manager.list_seed_plans(),
+            launch_plans=plan_options,
+            default_plan_name=default_launch_plan_name([option.name for option in plan_options]),
             launches=launch_manager.list_launches(),
             active_launch=launch_manager.get_active_launch(),
         )

@@ -70,7 +70,7 @@ class RepoData:
         path = self._resolve_run_path(run_name)
         payload = _read_json(path)
         summary = self._summary_from_payload(path, payload)
-        artifacts = self._related_artifacts_for_run(path)
+        artifacts = self._related_artifacts_for_run(payload)
         steps = payload.get("steps", [])
         if not isinstance(steps, list):
             steps = []
@@ -154,26 +154,33 @@ class RepoData:
             raise FileNotFoundError(run_name)
         return candidate
 
-    def _related_artifacts_for_run(self, run_path: Path) -> list[ArtifactEntry]:
-        if not self.settings.research_dir.exists():
+    def _related_artifacts_for_run(self, payload: dict) -> list[ArtifactEntry]:
+        steps = payload.get("steps", [])
+        if not isinstance(steps, list):
             return []
 
-        entries: list[ArtifactEntry] = []
-        for artifact_path in self.settings.research_dir.iterdir():
-            if artifact_path.is_file():
-                entries.append(_artifact_entry(self.settings.workspace_dir, artifact_path))
-        entries.sort(key=lambda entry: _artifact_sort_key(self.settings.workspace_dir, entry), reverse=True)
+        explicit_paths: list[str] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            for source in (step.get("result"), step.get("params")):
+                if not isinstance(source, dict):
+                    continue
+                raw_path = source.get("path")
+                if not isinstance(raw_path, str) or raw_path in explicit_paths:
+                    continue
+                try:
+                    resolved = self.resolve_artifact_path(raw_path)
+                except (ValueError, FileNotFoundError):
+                    continue
+                explicit_paths.append(_relative_to_workspace(self.settings.workspace_dir, resolved))
 
-        if not entries:
-            return []
-
-        run_mtime = run_path.stat().st_mtime
-        matched = [
-            entry
-            for entry in entries
-            if abs((self.settings.workspace_dir / entry.relative_path).stat().st_mtime - run_mtime) <= 900
+        entries = [
+            _artifact_entry(self.settings.workspace_dir, self.settings.workspace_dir / relative_path)
+            for relative_path in explicit_paths
         ]
-        return matched or entries[:5]
+        entries.sort(key=lambda entry: _artifact_sort_key(self.settings.workspace_dir, entry), reverse=True)
+        return entries
 
 
 def artifact_kind(path: Path) -> str:
@@ -309,4 +316,3 @@ def _coerce_int(value) -> int:
     if isinstance(value, int):
         return value
     return 0
-
