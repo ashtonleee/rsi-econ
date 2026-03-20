@@ -273,6 +273,8 @@ def test_refresh_launch_associates_run_events_and_latest_screenshot(tmp_path: Pa
     assert refreshed.exit_code == 0
     assert snapshot["proposal_ids"] == ["proposal-1"]
     assert snapshot["latest_screenshot"]["relative_path"] == "research/current_real_site_screenshot.png"
+    assert snapshot["current_screenshot"]["relative_path"] == "research/current_real_site_screenshot.png"
+    assert snapshot["recent_screenshots"][0]["relative_path"] == "research/current_real_site_screenshot.png"
     assert snapshot["timeline"][-1]["event_kind"] == "run_end"
 
 
@@ -300,3 +302,64 @@ def test_refresh_launch_marks_failed_when_process_exits_without_summary(tmp_path
     assert refreshed.status == "failed"
     assert refreshed.exit_code == 2
     assert "exited" in refreshed.error
+
+
+@pytest.mark.fast
+def test_active_launch_snapshot_uses_live_image_scan_before_summary_exists(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / ".seed_plans" / "stage6_answer_packet.json").write_text(
+        "[]\n",
+        encoding="utf-8",
+    )
+    manager = LaunchManager(
+        settings,
+        runner=lambda argv, *, log_path, cwd: 888,
+        pid_checker=lambda pid: True,
+        now_fn=lambda: "2026-03-20T00:40:00+00:00",
+    )
+    launch = manager.create_launch(
+        make_request(
+            script="stage6_answer_packet.json",
+            proposal_target_url="",
+        )
+    )
+    image_path = settings.workspace_dir / "research" / "live_capture.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    snapshot = manager.get_snapshot(launch.launch_id)
+
+    assert snapshot["summary_url"] == ""
+    assert snapshot["current_screenshot"]["relative_path"] == "research/live_capture.png"
+    assert snapshot["recent_screenshots"][0]["relative_path"] == "research/live_capture.png"
+
+
+@pytest.mark.fast
+def test_failed_launch_snapshot_does_not_inherit_stale_images(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / ".seed_plans" / "stage6_answer_packet.json").write_text(
+        "[]\n",
+        encoding="utf-8",
+    )
+    manager = LaunchManager(
+        settings,
+        runner=lambda argv, *, log_path, cwd: 999,
+        pid_checker=lambda pid: False,
+        now_fn=lambda: "2026-03-20T00:50:00+00:00",
+    )
+    launch = manager.create_launch(
+        make_request(
+            script="stage6_answer_packet.json",
+            proposal_target_url="",
+        )
+    )
+    (settings.workspace_dir / "research" / "old_capture.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (settings.launch_logs_dir / f"{launch.launch_id}.log").write_text(
+        "stderr line\n__RSI_EXIT_CODE__=1\n",
+        encoding="utf-8",
+    )
+
+    snapshot = manager.get_snapshot(launch.launch_id)
+
+    assert snapshot["launch"]["status"] == "failed"
+    assert snapshot["current_screenshot"] is None
+    assert snapshot["recent_screenshots"] == []

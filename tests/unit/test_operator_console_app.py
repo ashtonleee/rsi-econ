@@ -141,6 +141,8 @@ class FakeLaunchManager:
             "timeline": [],
             "proposal_ids": [],
             "latest_screenshot": None,
+            "current_screenshot": None,
+            "recent_screenshots": [],
             "summary_url": "",
             "related_artifacts": [],
             "log_tail": "",
@@ -322,6 +324,27 @@ def test_home_renders_status_active_launch_and_links(tmp_path: Path):
     launch_manager = FakeLaunchManager(settings)
     active_launch = make_running_launch()
     launch_manager.launches[active_launch.launch_id] = active_launch
+    launch_manager.snapshots[active_launch.launch_id] = {
+        "launch": active_launch.to_dict(),
+        "timeline": [
+            {
+                "timestamp": "2026-03-20T00:01:02+00:00",
+                "event_kind": "step",
+                "run_id": "run-123",
+                "step_index": 1,
+                "tool_name": "bridge_browser_render",
+                "summary": {"page_title": "Demo", "http_status": 200, "final_url": "https://httpbin.org/html"},
+            }
+        ],
+        "proposal_ids": [],
+        "latest_screenshot": None,
+        "current_screenshot": None,
+        "recent_screenshots": [],
+        "summary_url": "",
+        "related_artifacts": [],
+        "log_tail": "",
+        "version_token": "v1",
+    }
     app = create_app(
         settings=settings,
         bridge_api=FakeBridgeAPI(status=make_status(), proposals=make_proposals()),
@@ -337,6 +360,8 @@ def test_home_renders_status_active_launch_and_links(tmp_path: Path):
     assert "Active Launch" in response.text
     assert "launch-1" in response.text
     assert "Latest Pending Proposal" in response.text
+    assert "browsing" in response.text
+    assert "Watch for a screenshot or the next step summary." in response.text
 
 
 @pytest.mark.fast
@@ -510,6 +535,18 @@ def test_launch_detail_and_api_render_timeline_and_proposals(tmp_path: Path):
             "url": "/artifacts/research/current_real_site_screenshot.png",
             "name": "current_real_site_screenshot.png",
         },
+        "current_screenshot": {
+            "relative_path": "research/current_real_site_screenshot.png",
+            "url": "/artifacts/research/current_real_site_screenshot.png",
+            "name": "current_real_site_screenshot.png",
+        },
+        "recent_screenshots": [
+            {
+                "relative_path": "research/current_real_site_screenshot.png",
+                "url": "/artifacts/research/current_real_site_screenshot.png",
+                "name": "current_real_site_screenshot.png",
+            }
+        ],
         "summary_url": "/runs/latest_seed_run.json",
         "related_artifacts": [
             {
@@ -533,13 +570,107 @@ def test_launch_detail_and_api_render_timeline_and_proposals(tmp_path: Path):
         api_response = client.get("/api/launches/launch-1")
 
     assert html_response.status_code == 200
-    assert "Live Launch" in html_response.text
-    assert "bridge_browser_render" in html_response.text
+    assert "Live Workspace" in html_response.text
+    assert "EventSource" in html_response.text
+    assert "id=\"live-preview-panel\"" in html_response.text
+    assert "id=\"approval-banner\"" in html_response.text
+    assert "<details>" in html_response.text
     assert "pending-1" in html_response.text
     assert "current_real_site_screenshot.png" in html_response.text
     assert api_response.status_code == 200
     assert api_response.json()["launch"]["launch_id"] == "launch-1"
-    assert api_response.json()["timeline"][0]["tool_name"] == "bridge_browser_render"
+    assert api_response.json()["timeline"][0]["title"] in {"Prepared approval request", "Opened page"}
+    assert api_response.json()["phase_label"] == "waiting_for_approval"
+
+
+@pytest.mark.fast
+def test_launch_stream_returns_initial_snapshot_event(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    launch_manager = FakeLaunchManager(settings)
+    launch = make_running_launch()
+    launch_manager.launches[launch.launch_id] = launch
+    launch_manager.snapshots[launch.launch_id] = {
+        "launch": launch.to_dict(),
+        "timeline": [],
+        "proposal_ids": [],
+        "latest_screenshot": None,
+        "current_screenshot": None,
+        "recent_screenshots": [],
+        "summary_url": "",
+        "related_artifacts": [],
+        "log_tail": "",
+        "version_token": "v1",
+    }
+    app = create_app(
+        settings=settings,
+        bridge_api=FakeBridgeAPI(status=make_status(), proposals=make_proposals()),
+        repo_data=RepoData(settings),
+        launch_manager=launch_manager,
+    )
+
+    with TestClient(app) as client:
+        with client.stream("GET", "/api/launches/launch-1/stream?once=1") as response:
+            chunks = []
+            for line in response.iter_lines():
+                chunks.append(line)
+                if line == "":
+                    break
+
+    body = "\n".join(chunks)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: snapshot" in body
+    assert "\"launch_id\": \"launch-1\"" in body
+
+
+@pytest.mark.fast
+def test_failure_launch_page_shows_friendly_diagnostic(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    launch_manager = FakeLaunchManager(settings)
+    failed_launch = LaunchRecord(
+        launch_id="launch-failed",
+        created_at="2026-03-20T00:01:00+00:00",
+        status="failed",
+        task="demo task",
+        script="stage6_answer_packet.json",
+        launch_mode="default",
+        model="",
+        input_url="https://blocked.example/article",
+        follow_target_url="",
+        proposal_target_url="",
+        max_steps=8,
+        pid=4242,
+        run_id="run-123",
+        summary_path="",
+        exit_code=2,
+        error="launch exited before a run summary appeared",
+    )
+    launch_manager.launches[failed_launch.launch_id] = failed_launch
+    launch_manager.snapshots[failed_launch.launch_id] = {
+        "launch": failed_launch.to_dict(),
+        "timeline": [],
+        "proposal_ids": [],
+        "latest_screenshot": None,
+        "current_screenshot": None,
+        "recent_screenshots": [],
+        "summary_url": "",
+        "related_artifacts": [],
+        "log_tail": "stderr line",
+        "version_token": "v1",
+    }
+    app = create_app(
+        settings=settings,
+        bridge_api=FakeBridgeAPI(error="bridge unavailable"),
+        repo_data=RepoData(settings),
+        launch_manager=launch_manager,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/launches/launch-failed")
+
+    assert response.status_code == 200
+    assert "Launch failed before summary" in response.text
+    assert "inspect the launch log tail" in response.text.lower()
 
 
 @pytest.mark.fast

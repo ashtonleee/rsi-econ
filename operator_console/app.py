@@ -1,15 +1,18 @@
-from pathlib import Path
+import asyncio
 import json
+from pathlib import Path
+from time import monotonic
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from operator_console.bridge_api import BridgeAPI, BridgeAPIError, BridgeNotFoundError
 from operator_console.config import ConsoleSettings, console_settings
 from operator_console.data import RepoData
 from operator_console.launches import LaunchBusyError, LaunchManager, LaunchRequest
+from operator_console.live_state import build_live_snapshot
 from operator_console.plan_catalog import build_launch_plan_options, default_launch_plan_name
 
 
@@ -78,6 +81,17 @@ def create_app(
         except BridgeAPIError as exc:
             bridge_error = str(exc)
 
+        active_snapshot = None
+        if active_launch is not None:
+            raw_snapshot = launch_manager.get_snapshot(active_launch.launch_id)
+            active_proposals, proposal_error = await load_snapshot_proposals(raw_snapshot)
+            active_snapshot = build_live_snapshot(
+                raw_snapshot,
+                related_proposals=active_proposals,
+                allowlist_hosts=status.web.allowlist_hosts if status else None,
+                bridge_error=bridge_error or proposal_error,
+            )
+
         runs = repo_data.list_run_summaries()
         latest_run = runs[0] if runs else None
         return render_page(
@@ -89,6 +103,7 @@ def create_app(
             latest_run=latest_run,
             latest_pending=latest_pending,
             active_launch=active_launch,
+            active_snapshot=active_snapshot,
             run_count=len(runs),
         )
 
@@ -132,32 +147,61 @@ def create_app(
     @app.get("/launches/{launch_id}", response_class=HTMLResponse)
     async def launch_detail(request: Request, launch_id: str) -> HTMLResponse:
         try:
-            snapshot = launch_manager.get_snapshot(launch_id)
+            snapshot = await load_live_snapshot(launch_id)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="launch not found")
-        proposals, bridge_error = await load_snapshot_proposals(snapshot)
         return render_page(
             request,
             "launch_detail.html",
             page_title=f"Launch {launch_id}",
             snapshot=snapshot,
-            related_proposals=proposals,
-            bridge_error=bridge_error,
         )
 
     @app.get("/api/launches/{launch_id}")
     async def launch_snapshot(launch_id: str) -> JSONResponse:
         try:
-            snapshot = launch_manager.get_snapshot(launch_id)
+            snapshot = await load_live_snapshot(launch_id)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="launch not found")
-        proposals, bridge_error = await load_snapshot_proposals(snapshot)
-        return JSONResponse(
-            {
-                **snapshot,
-                "related_proposals": [proposal.model_dump() for proposal in proposals],
-                "bridge_error": bridge_error,
-            }
+        return JSONResponse(snapshot)
+
+    @app.get("/api/launches/{launch_id}/stream")
+    async def launch_stream(request: Request, launch_id: str, once: int = 0) -> StreamingResponse:
+        try:
+            await load_live_snapshot(launch_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="launch not found")
+
+        async def event_source():
+            last_version = ""
+            next_heartbeat = monotonic() + 15.0
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    snapshot = await load_live_snapshot(launch_id)
+                except FileNotFoundError:
+                    break
+                if snapshot["version_token"] != last_version:
+                    last_version = snapshot["version_token"]
+                    next_heartbeat = monotonic() + 15.0
+                    yield sse_event("snapshot", snapshot)
+                    if once:
+                        break
+                elif monotonic() >= next_heartbeat:
+                    next_heartbeat = monotonic() + 15.0
+                    yield sse_event("heartbeat", {"launch_id": launch_id})
+                    if once:
+                        break
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(
+            event_source(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.get("/runs", response_class=HTMLResponse)
@@ -282,6 +326,24 @@ def create_app(
             return [], str(exc)
         return proposals, ""
 
+    async def load_live_snapshot(launch_id: str) -> dict:
+        raw_snapshot = launch_manager.get_snapshot(launch_id)
+        proposals, proposal_error = await load_snapshot_proposals(raw_snapshot)
+
+        status = None
+        status_error = ""
+        try:
+            status = await bridge_api.get_status()
+        except BridgeAPIError as exc:
+            status_error = str(exc)
+
+        return build_live_snapshot(
+            raw_snapshot,
+            related_proposals=proposals,
+            allowlist_hosts=status.web.allowlist_hosts if status else None,
+            bridge_error=status_error or proposal_error,
+        )
+
     async def proposal_action_redirect(
         request: Request,
         proposal_id: str,
@@ -323,6 +385,10 @@ def redirect_with_flash(path: str, message: str, *, level: str) -> RedirectRespo
     query = urlencode({"flash": message, "flash_level": level})
     separator = "&" if "?" in path else "?"
     return RedirectResponse(url=f"{path}{separator}{query}", status_code=303)
+
+
+def sse_event(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
 app = create_app()

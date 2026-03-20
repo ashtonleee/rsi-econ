@@ -244,7 +244,7 @@ class LaunchManager:
 
         related_artifacts: list[dict] = []
         summary_url = ""
-        latest_screenshot = None
+        recent_screenshots: list[dict] = []
         if launch.summary_path:
             summary_url = f"/runs/{Path(launch.summary_path).name}"
             try:
@@ -253,24 +253,25 @@ class LaunchManager:
                 detail = None
             if detail is not None:
                 related_artifacts = [_artifact_dict(artifact) for artifact in detail.related_artifacts]
-                if latest_screenshot is None:
-                    for artifact in detail.related_artifacts:
-                        artifact_path = self.settings.workspace_dir / artifact.relative_path
-                        if artifact_kind(artifact_path) == "image":
-                            latest_screenshot = {
-                                "name": artifact.name,
-                                "relative_path": artifact.relative_path,
-                                "url": f"/artifacts/{artifact.relative_path}",
-                            }
-                            break
-        if latest_screenshot is None and launch.status in ACTIVE_LAUNCH_STATUSES:
-            latest_screenshot = self._latest_screenshot_for_launch(launch)
+                recent_screenshots = [
+                    {
+                        **_artifact_dict(artifact),
+                        "url": f"/artifacts/{artifact.relative_path}",
+                    }
+                    for artifact in detail.related_artifacts
+                    if artifact_kind(self.settings.workspace_dir / artifact.relative_path) == "image"
+                ]
+        if not recent_screenshots and launch.status in ACTIVE_LAUNCH_STATUSES:
+            recent_screenshots = self._recent_screenshots_for_launch(launch)
+        current_screenshot = recent_screenshots[0] if recent_screenshots else None
 
         return {
             "launch": launch.to_dict(),
             "timeline": timeline,
             "proposal_ids": proposal_ids,
-            "latest_screenshot": latest_screenshot,
+            "latest_screenshot": current_screenshot,
+            "current_screenshot": current_screenshot,
+            "recent_screenshots": recent_screenshots,
             "summary_url": summary_url,
             "related_artifacts": related_artifacts,
             "log_tail": self._tail_log(launch.launch_id),
@@ -278,7 +279,7 @@ class LaunchManager:
                 launch,
                 timeline=timeline,
                 proposal_ids=proposal_ids,
-                latest_screenshot=latest_screenshot,
+                latest_screenshot=current_screenshot,
             ),
         }
 
@@ -380,10 +381,10 @@ class LaunchManager:
             if event["run_id"] == launch.run_id
         ]
 
-    def _latest_screenshot_for_launch(self, launch: LaunchRecord) -> dict | None:
+    def _recent_screenshots_for_launch(self, launch: LaunchRecord) -> list[dict]:
         research_dir = self.settings.research_dir
         if not research_dir.exists():
-            return None
+            return []
         created_at = _parse_timestamp(launch.created_at)
         candidates: list[Path] = []
         for path in research_dir.iterdir():
@@ -394,14 +395,22 @@ class LaunchManager:
             if datetime.fromtimestamp(path.stat().st_mtime).astimezone() >= created_at:
                 candidates.append(path)
         if not candidates:
-            return None
-        latest = max(candidates, key=lambda path: path.stat().st_mtime)
-        relative_path = str(latest.resolve().relative_to(self.settings.workspace_dir.resolve()))
-        return {
-            "name": latest.name,
-            "relative_path": relative_path,
-            "url": f"/artifacts/{relative_path}",
-        }
+            return []
+        ordered = sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+        screenshots: list[dict] = []
+        for path in ordered:
+            relative_path = str(path.resolve().relative_to(self.settings.workspace_dir.resolve()))
+            screenshots.append(
+                {
+                    "name": path.name,
+                    "relative_path": relative_path,
+                    "kind": "image",
+                    "modified_at": _format_file_timestamp(path),
+                    "size_bytes": path.stat().st_size,
+                    "url": f"/artifacts/{relative_path}",
+                }
+            )
+        return screenshots
 
     def _summary_exists(self, summary_path: str) -> bool:
         path = (self.settings.workspace_dir / summary_path).resolve()
@@ -483,6 +492,10 @@ def _artifact_dict(artifact) -> dict:
 
 def _parse_timestamp(raw: str) -> datetime:
     return datetime.fromisoformat(raw)
+
+
+def _format_file_timestamp(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
 
 
 def _now_iso() -> str:

@@ -98,7 +98,23 @@
       </div>
 
       <div style="margin-top: 1rem;" class="artifact-list">
-        {% if active_launch %}
+        {% if active_launch and active_snapshot %}
+          <a class="artifact-card {% if active_snapshot.phase_label == 'waiting_for_approval' %}artifact-card-emphasis{% endif %}" href="/launches/{{ active_launch.launch_id }}">
+            <div>
+              <strong>Active Launch</strong>
+              <div><code>{{ active_launch.launch_id }}</code></div>
+              <div class="muted">{{ active_launch.task }}</div>
+              <div style="margin-top: 0.55rem;">
+                <span class="pill {{ active_snapshot.phase_tone }}">{{ active_snapshot.phase_label.replace("_", " ") }}</span>
+              </div>
+              <div style="margin-top: 0.55rem;">{{ active_snapshot.headline }}</div>
+              <div class="muted" style="margin-top: 0.35rem;">{{ active_snapshot.next_action }}</div>
+            </div>
+            <div>
+              <span class="pill {{ active_snapshot.phase_tone }}">{{ active_launch.status }}</span>
+            </div>
+          </a>
+        {% elif active_launch %}
           <a class="artifact-card" href="/launches/{{ active_launch.launch_id }}">
             <div>
               <strong>Active Launch</strong>

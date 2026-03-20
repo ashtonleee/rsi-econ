@@ -1,22 +1,65 @@
 {% extends "base.html" %}
 {% block content %}
   {% set launch = snapshot.launch %}
-  <section class="grid two">
-    <article class="panel">
+  <section class="workspace-top">
+    <article class="panel preview-stage">
       <div class="hero">
         <div>
-          <h2 style="margin-bottom: 0.35rem;">Live Launch</h2>
-          <div class="muted">Polling every 2.5 seconds while the launch is active.</div>
+          <h2 style="margin-bottom: 0.35rem;">Live Workspace</h2>
+          <div class="muted">Browser visuals first, with live updates from the local launch state and trusted bridge events.</div>
         </div>
         <div class="inline-actions">
-          <span class="pill {% if launch.status in ['running', 'starting'] %}warn{% elif launch.status == 'finished' %}ok{% else %}bad{% endif %}">{{ launch.status }}</span>
+          <span class="pill {{ snapshot.phase_tone }}">{{ snapshot.phase_label.replace("_", " ") }}</span>
           {% if snapshot.summary_url %}
             <a class="button" href="{{ snapshot.summary_url }}">Open Final Run JSON</a>
           {% endif %}
         </div>
       </div>
 
-      <dl class="meta-list" style="margin-top: 1rem;">
+      <div id="live-preview-panel">
+        {% if snapshot.current_screenshot %}
+          <a href="{{ snapshot.current_screenshot.url }}">
+            <img class="preview preview-stage-image" src="{{ snapshot.current_screenshot.url }}" alt="{{ snapshot.current_screenshot.name }}">
+          </a>
+          <div class="preview-caption">
+            <strong>Current preview</strong>
+            <div class="muted">{{ snapshot.current_screenshot.name }}</div>
+          </div>
+        {% else %}
+          <div class="empty preview-empty">No browser-facing screenshot has been found for this launch yet.</div>
+        {% endif %}
+
+        {% if snapshot.recent_screenshots|length > 1 %}
+          <div class="filmstrip">
+            {% for item in snapshot.recent_screenshots %}
+              <button
+                class="film-thumb {% if loop.first %}active{% endif %}"
+                type="button"
+                data-screenshot="{{ item.relative_path }}"
+              >
+                {{ item.name }}
+              </button>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="panel status-stage" id="status-panel">
+      <div class="status-hero">
+        <div>
+          <div class="eyebrow">Current phase</div>
+          <h2 style="margin-bottom: 0.4rem;">{{ snapshot.headline }}</h2>
+        </div>
+        <span class="pill {{ snapshot.phase_tone }}">{{ launch.status }}</span>
+      </div>
+
+      <div class="callout {% if snapshot.phase_tone == 'bad' %}error{% endif %}" style="margin-bottom: 1rem;">
+        <strong>Next action</strong>
+        <div>{{ snapshot.next_action }}</div>
+      </div>
+
+      <dl class="meta-list">
         <div class="meta-row">
           <dt>Launch ID</dt>
           <dd><code>{{ launch.launch_id }}</code></dd>
@@ -38,10 +81,6 @@
           <dd><code>{{ launch.run_id or "waiting for run_start" }}</code></dd>
         </div>
         <div class="meta-row">
-          <dt>Summary path</dt>
-          <dd><code>{{ launch.summary_path or "not written yet" }}</code></dd>
-        </div>
-        <div class="meta-row">
           <dt>Targets</dt>
           <dd>
             <div><strong>input:</strong> {{ launch.input_url or "n/a" }}</div>
@@ -51,114 +90,119 @@
         </div>
       </dl>
 
-      {% if launch.error %}
-        <div class="callout error" style="margin-top: 1rem;">
-          <strong>Launch error</strong>
-          <div>{{ launch.error }}</div>
-        </div>
-      {% endif %}
-    </article>
-
-    <article class="panel">
-      <h2>Browser Preview</h2>
-      {% if snapshot.latest_screenshot %}
-        <a href="{{ snapshot.latest_screenshot.url }}">
-          <img class="preview" src="{{ snapshot.latest_screenshot.url }}" alt="{{ snapshot.latest_screenshot.name }}">
-        </a>
-        <div class="muted" style="margin-top: 0.65rem;">
-          Latest screenshot: <a href="{{ snapshot.latest_screenshot.url }}">{{ snapshot.latest_screenshot.name }}</a>
-        </div>
-      {% else %}
-        <div class="empty">No browser-facing screenshot has been found for this launch yet.</div>
-      {% endif %}
-
-      {% if related_proposals %}
-        <h3 style="margin-top: 1rem;">Approval State</h3>
-        {% for proposal in related_proposals %}
-          <div class="artifact-card" style="margin-bottom: 0.65rem;">
-            <div>
-              <strong><a href="/proposals/{{ proposal.proposal_id }}"><code>{{ proposal.proposal_id }}</code></a></strong>
-              <div class="muted">{{ proposal.action_type }}</div>
+      <div class="diagnostic-list" id="diagnostic-list" style="margin-top: 1rem;">
+        {% if snapshot.diagnostics %}
+          {% for diagnostic in snapshot.diagnostics %}
+            <div class="diagnostic diagnostic-{{ diagnostic.severity }}">
+              <strong>{{ diagnostic.title }}</strong>
+              <div>{{ diagnostic.body }}</div>
             </div>
-            <div>
-              <span class="pill {% if proposal.status == 'pending' %}warn{% elif proposal.status == 'executed' %}ok{% else %}bad{% endif %}">{{ proposal.status }}</span>
-            </div>
-          </div>
-          {% if proposal.status == "pending" %}
-            <div class="callout" style="margin: 0 0 0.75rem;">
-              <strong>Pending approval needs operator action.</strong>
-              <div>This launch has reached an approval gate.</div>
-            </div>
-            <div class="grid two" style="margin-bottom: 1rem;">
-              <form method="post" action="/proposals/{{ proposal.proposal_id }}/approve">
-                <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
-                <div class="field">
-                  <label for="approve-{{ proposal.proposal_id }}">Approve reason</label>
-                  <textarea id="approve-{{ proposal.proposal_id }}" name="reason">approved from launch monitor</textarea>
-                </div>
-                <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
-              </form>
-              <form method="post" action="/proposals/{{ proposal.proposal_id }}/reject">
-                <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
-                <div class="field">
-                  <label for="reject-{{ proposal.proposal_id }}">Reject reason</label>
-                  <textarea id="reject-{{ proposal.proposal_id }}" name="reason"></textarea>
-                </div>
-                <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
-              </form>
-            </div>
-          {% elif proposal.status == "approved" %}
-            <form method="post" action="/proposals/{{ proposal.proposal_id }}/execute" style="margin-bottom: 1rem;">
-              <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
-              <button class="primary" type="submit">Execute</button>
-            </form>
-          {% endif %}
-        {% endfor %}
-      {% elif bridge_error %}
-        <div class="callout error" style="margin-top: 1rem;">
-          <strong>Proposal lookup unavailable.</strong>
-          <div>{{ bridge_error }}</div>
-        </div>
-      {% endif %}
+          {% endfor %}
+        {% else %}
+          <div class="empty">No friendly diagnostics are active right now.</div>
+        {% endif %}
+      </div>
     </article>
   </section>
 
-  <section class="grid two">
+  <section class="panel approval-banner" id="approval-banner">
+    {% if snapshot.related_proposals %}
+      {% for proposal in snapshot.related_proposals %}
+        <div class="approval-banner-head">
+          <div>
+            <div class="eyebrow">Approval state</div>
+            <h3 style="margin-bottom: 0.35rem;">{{ proposal.action_type }} for <code>{{ proposal.proposal_id }}</code></h3>
+            <div class="muted">{{ proposal.action_payload.url if proposal.action_payload and proposal.action_payload.url else "No target URL recorded." }}</div>
+          </div>
+          <span class="pill {% if proposal.status == 'pending' %}warn{% elif proposal.status == 'executed' %}ok{% elif proposal.status == 'approved' %}warn{% else %}bad{% endif %}">{{ proposal.status }}</span>
+        </div>
+        {% if proposal.status == "pending" %}
+          <div class="callout" style="margin-bottom: 1rem;">
+            <strong>Pending approval</strong>
+            <div>The agent is paused until you approve or reject this proposal.</div>
+          </div>
+          <div class="grid two">
+            <form method="post" action="/proposals/{{ proposal.proposal_id }}/approve">
+              <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
+              <div class="field">
+                <label for="approve-{{ proposal.proposal_id }}">Approve reason</label>
+                <textarea id="approve-{{ proposal.proposal_id }}" name="reason">approved from live workspace</textarea>
+              </div>
+              <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
+            </form>
+            <form method="post" action="/proposals/{{ proposal.proposal_id }}/reject">
+              <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
+              <div class="field">
+                <label for="reject-{{ proposal.proposal_id }}">Reject reason</label>
+                <textarea id="reject-{{ proposal.proposal_id }}" name="reason"></textarea>
+              </div>
+              <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
+            </form>
+          </div>
+        {% elif proposal.status == "approved" %}
+          <div class="callout" style="margin-bottom: 1rem;">
+            <strong>Ready to execute</strong>
+            <div>The approval is already recorded. Execute when you want the external action to run.</div>
+          </div>
+          <form method="post" action="/proposals/{{ proposal.proposal_id }}/execute">
+            <input type="hidden" name="redirect_to" value="/launches/{{ launch.launch_id }}">
+            <button class="primary" type="submit">Execute</button>
+          </form>
+        {% elif proposal.status == "executed" %}
+          <div class="callout" style="margin-bottom: 1rem;">
+            <strong>Executed</strong>
+            <div>This proposal already ran. Review the execution result and any follow-up artifacts.</div>
+          </div>
+        {% endif %}
+      {% endfor %}
+    {% else %}
+      <div class="empty">No approval gate is active for this launch right now.</div>
+    {% endif %}
+  </section>
+
+  <section class="workspace-bottom">
     <article class="panel">
-      <h2>Step Timeline</h2>
-      {% if snapshot.timeline %}
-        <div class="timeline">
+      <div class="hero">
+        <div>
+          <h2 style="margin-bottom: 0.35rem;">Live Timeline</h2>
+          <div class="muted">Newest meaningful items stay near the top. Technical details are still available underneath each summary.</div>
+        </div>
+      </div>
+      <div class="timeline" id="live-timeline">
+        {% if snapshot.timeline %}
           {% for event in snapshot.timeline %}
-            <article class="timeline-item">
+            <article class="timeline-item timeline-{{ event.tone }}">
               <div class="timeline-head">
+                <div>
+                  <strong>{{ event.title }}</strong>
+                  <div class="muted">{{ event.summary_text }}</div>
+                </div>
                 <div class="inline-actions">
-                  <span class="pill">{{ event.event_kind }}</span>
                   {% if event.step_index is not none %}
                     <span class="pill">step {{ event.step_index }}</span>
                   {% endif %}
                   {% if event.tool_name %}
                     <span class="pill">{{ event.tool_name }}</span>
                   {% endif %}
+                  <span class="pill {{ event.tone }}">{{ event.timestamp }}</span>
                 </div>
-                <div class="muted">{{ event.timestamp }}</div>
               </div>
-              {% if event.summary %}
+              <details>
+                <summary>Technical details</summary>
                 <pre>{{ event.summary | pretty_json }}</pre>
-              {% else %}
-                <div class="muted">No summary payload for this event.</div>
-              {% endif %}
+              </details>
             </article>
           {% endfor %}
-        </div>
-      {% else %}
-        <div class="empty">Timeline events will appear after the bridge records a matching <code>run_start</code>.</div>
-      {% endif %}
+        {% else %}
+          <div class="empty">Timeline events will appear after the bridge records a matching <code>run_start</code>.</div>
+        {% endif %}
+      </div>
     </article>
 
     <article class="panel">
       <h2>Artifacts And Logs</h2>
-      {% if snapshot.related_artifacts %}
-        <div class="artifact-list">
+      <div class="artifact-list" id="live-artifacts">
+        {% if snapshot.related_artifacts %}
           {% for artifact in snapshot.related_artifacts %}
             <a class="artifact-card" href="{{ artifact.url }}">
               <div>
@@ -173,40 +217,351 @@
               </div>
             </a>
           {% endfor %}
+        {% else %}
+          <div class="empty">No matching artifacts have been linked yet.</div>
+        {% endif %}
+      </div>
+
+      <div class="callout" style="margin-top: 1rem;">
+        <strong>Summary</strong>
+        <div>
+          {% if snapshot.summary_url %}
+            <a href="{{ snapshot.summary_url }}">Open the final run summary JSON</a>
+          {% else %}
+            The run summary has not been written yet.
+          {% endif %}
         </div>
-      {% else %}
-        <div class="empty">No matching artifacts have been linked yet.</div>
-      {% endif %}
+      </div>
 
       <h3 style="margin-top: 1rem;">Launch Log Tail</h3>
-      {% if snapshot.log_tail %}
-        <pre>{{ snapshot.log_tail }}</pre>
-      {% else %}
-        <div class="empty">No launch log output yet.</div>
-      {% endif %}
+      <div id="live-log-tail">
+        {% if snapshot.log_tail %}
+          <pre>{{ snapshot.log_tail }}</pre>
+        {% else %}
+          <div class="empty">No launch log output yet.</div>
+        {% endif %}
+      </div>
     </article>
   </section>
 
-  {% if launch.status in ["starting", "running"] %}
-    <script>
-      (() => {
-        const currentVersion = {{ snapshot.version_token | tojson }};
-        const launchId = {{ launch.launch_id | tojson }};
-        async function poll() {
-          try {
-            const response = await fetch(`/api/launches/${launchId}`, { headers: { "Accept": "application/json" } });
-            if (!response.ok) {
-              return;
-            }
-            const payload = await response.json();
-            if (payload.version_token !== currentVersion) {
-              window.location.reload();
-            }
-          } catch (error) {
+  <script id="launch-snapshot" type="application/json">{{ snapshot | tojson }}</script>
+  <script>
+    (() => {
+      const launchId = {{ launch.launch_id | tojson }};
+      const snapshotNode = document.getElementById("launch-snapshot");
+      const previewPanel = document.getElementById("live-preview-panel");
+      const statusPanel = document.getElementById("status-panel");
+      const approvalBanner = document.getElementById("approval-banner");
+      const timelinePanel = document.getElementById("live-timeline");
+      const artifactsPanel = document.getElementById("live-artifacts");
+      const logTailPanel = document.getElementById("live-log-tail");
+      let currentSnapshot = JSON.parse(snapshotNode.textContent);
+      let selectedScreenshot = currentSnapshot.current_screenshot ? currentSnapshot.current_screenshot.relative_path : "";
+      let eventSource = null;
+      let fallbackPoll = null;
+      let sourceErrors = 0;
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function prettyJson(value) {
+        return escapeHtml(JSON.stringify(value ?? {}, null, 2));
+      }
+
+      function proposalTone(status) {
+        if (status === "executed") return "ok";
+        if (status === "pending" || status === "approved") return "warn";
+        return "bad";
+      }
+
+      function currentScreenshot(snapshot) {
+        const available = snapshot.recent_screenshots || [];
+        if (selectedScreenshot) {
+          const matched = available.find((item) => item.relative_path === selectedScreenshot);
+          if (matched) {
+            return matched;
           }
         }
-        window.setInterval(poll, 2500);
-      })();
-    </script>
-  {% endif %}
+        if (snapshot.current_screenshot) {
+          selectedScreenshot = snapshot.current_screenshot.relative_path || "";
+          return snapshot.current_screenshot;
+        }
+        selectedScreenshot = "";
+        return null;
+      }
+
+      function renderPreview(snapshot) {
+        const image = currentScreenshot(snapshot);
+        const filmstrip = (snapshot.recent_screenshots || []).map((item) => `
+          <button
+            class="film-thumb ${item.relative_path === selectedScreenshot ? "active" : ""}"
+            type="button"
+            data-screenshot="${escapeHtml(item.relative_path)}"
+          >
+            ${escapeHtml(item.name)}
+          </button>
+        `).join("");
+
+        if (!image) {
+          previewPanel.innerHTML = '<div class="empty preview-empty">No browser-facing screenshot has been found for this launch yet.</div>';
+          return;
+        }
+
+        previewPanel.innerHTML = `
+          <a href="${escapeHtml(image.url)}">
+            <img class="preview preview-stage-image" src="${escapeHtml(image.url)}" alt="${escapeHtml(image.name)}">
+          </a>
+          <div class="preview-caption">
+            <strong>Current preview</strong>
+            <div class="muted">${escapeHtml(image.name)}</div>
+          </div>
+          ${filmstrip && (snapshot.recent_screenshots || []).length > 1 ? `<div class="filmstrip">${filmstrip}</div>` : ""}
+        `;
+
+        previewPanel.querySelectorAll("[data-screenshot]").forEach((button) => {
+          button.addEventListener("click", () => {
+            selectedScreenshot = button.getAttribute("data-screenshot") || "";
+            renderPreview(currentSnapshot);
+          });
+        });
+      }
+
+      function renderStatus(snapshot) {
+        const launch = snapshot.launch;
+        const diagnostics = (snapshot.diagnostics || []).map((diagnostic) => `
+          <div class="diagnostic diagnostic-${escapeHtml(diagnostic.severity)}">
+            <strong>${escapeHtml(diagnostic.title)}</strong>
+            <div>${escapeHtml(diagnostic.body)}</div>
+          </div>
+        `).join("") || '<div class="empty">No friendly diagnostics are active right now.</div>';
+
+        statusPanel.innerHTML = `
+          <div class="status-hero">
+            <div>
+              <div class="eyebrow">Current phase</div>
+              <h2 style="margin-bottom: 0.4rem;">${escapeHtml(snapshot.headline)}</h2>
+            </div>
+            <span class="pill ${escapeHtml(snapshot.phase_tone)}">${escapeHtml(launch.status)}</span>
+          </div>
+          <div class="callout ${snapshot.phase_tone === "bad" ? "error" : ""}" style="margin-bottom: 1rem;">
+            <strong>Next action</strong>
+            <div>${escapeHtml(snapshot.next_action)}</div>
+          </div>
+          <dl class="meta-list">
+            <div class="meta-row">
+              <dt>Launch ID</dt>
+              <dd><code>${escapeHtml(launch.launch_id)}</code></dd>
+            </div>
+            <div class="meta-row">
+              <dt>Task</dt>
+              <dd>${escapeHtml(launch.task)}</dd>
+            </div>
+            <div class="meta-row">
+              <dt>Script</dt>
+              <dd><code>${escapeHtml(launch.script)}</code></dd>
+            </div>
+            <div class="meta-row">
+              <dt>Mode</dt>
+              <dd>${escapeHtml(launch.launch_mode)}${launch.model ? ` / <code>${escapeHtml(launch.model)}</code>` : ""}</dd>
+            </div>
+            <div class="meta-row">
+              <dt>Run ID</dt>
+              <dd><code>${escapeHtml(launch.run_id || "waiting for run_start")}</code></dd>
+            </div>
+            <div class="meta-row">
+              <dt>Targets</dt>
+              <dd>
+                <div><strong>input:</strong> ${escapeHtml(launch.input_url || "n/a")}</div>
+                <div><strong>follow:</strong> ${escapeHtml(launch.follow_target_url || "n/a")}</div>
+                <div><strong>proposal:</strong> ${escapeHtml(launch.proposal_target_url || "n/a")}</div>
+              </dd>
+            </div>
+          </dl>
+          <div class="diagnostic-list" id="diagnostic-list" style="margin-top: 1rem;">${diagnostics}</div>
+        `;
+      }
+
+      function actionUrl(proposalId, action) {
+        return `/proposals/${proposalId}/${action}`;
+      }
+
+      function renderApprovalBanner(snapshot) {
+        const proposals = snapshot.related_proposals || [];
+        if (proposals.length === 0) {
+          approvalBanner.innerHTML = '<div class="empty">No approval gate is active for this launch right now.</div>';
+          return;
+        }
+
+        approvalBanner.innerHTML = proposals.map((proposal) => {
+          const target = proposal.action_payload && proposal.action_payload.url ? proposal.action_payload.url : "No target URL recorded.";
+          let body = `
+            <div class="approval-banner-head">
+              <div>
+                <div class="eyebrow">Approval state</div>
+                <h3 style="margin-bottom: 0.35rem;">${escapeHtml(proposal.action_type)} for <code>${escapeHtml(proposal.proposal_id)}</code></h3>
+                <div class="muted">${escapeHtml(target)}</div>
+              </div>
+              <span class="pill ${proposalTone(proposal.status)}">${escapeHtml(proposal.status)}</span>
+            </div>
+          `;
+
+          if (proposal.status === "pending") {
+            body += `
+              <div class="callout" style="margin-bottom: 1rem;">
+                <strong>Pending approval</strong>
+                <div>The agent is paused until you approve or reject this proposal.</div>
+              </div>
+              <div class="grid two">
+                <form method="post" action="${actionUrl(proposal.proposal_id, "approve")}">
+                  <input type="hidden" name="redirect_to" value="/launches/${escapeHtml(launchId)}">
+                  <div class="field">
+                    <label for="approve-${escapeHtml(proposal.proposal_id)}">Approve reason</label>
+                    <textarea id="approve-${escapeHtml(proposal.proposal_id)}" name="reason">approved from live workspace</textarea>
+                  </div>
+                  <button class="primary" type="submit" style="margin-top: 0.75rem;">Approve</button>
+                </form>
+                <form method="post" action="${actionUrl(proposal.proposal_id, "reject")}">
+                  <input type="hidden" name="redirect_to" value="/launches/${escapeHtml(launchId)}">
+                  <div class="field">
+                    <label for="reject-${escapeHtml(proposal.proposal_id)}">Reject reason</label>
+                    <textarea id="reject-${escapeHtml(proposal.proposal_id)}" name="reason"></textarea>
+                  </div>
+                  <button class="bad" type="submit" style="margin-top: 0.75rem;">Reject</button>
+                </form>
+              </div>
+            `;
+          } else if (proposal.status === "approved") {
+            body += `
+              <div class="callout" style="margin-bottom: 1rem;">
+                <strong>Ready to execute</strong>
+                <div>The approval is already recorded. Execute when you want the external action to run.</div>
+              </div>
+              <form method="post" action="${actionUrl(proposal.proposal_id, "execute")}">
+                <input type="hidden" name="redirect_to" value="/launches/${escapeHtml(launchId)}">
+                <button class="primary" type="submit">Execute</button>
+              </form>
+            `;
+          } else if (proposal.status === "executed") {
+            body += `
+              <div class="callout" style="margin-bottom: 1rem;">
+                <strong>Executed</strong>
+                <div>This proposal already ran. Review the execution result and any follow-up artifacts.</div>
+              </div>
+            `;
+          }
+          return body;
+        }).join("");
+      }
+
+      function renderTimeline(snapshot) {
+        const items = snapshot.timeline || [];
+        if (items.length === 0) {
+          timelinePanel.innerHTML = '<div class="empty">Timeline events will appear after the bridge records a matching <code>run_start</code>.</div>';
+          return;
+        }
+        timelinePanel.innerHTML = items.map((event) => `
+          <article class="timeline-item timeline-${escapeHtml(event.tone)}">
+            <div class="timeline-head">
+              <div>
+                <strong>${escapeHtml(event.title)}</strong>
+                <div class="muted">${escapeHtml(event.summary_text)}</div>
+              </div>
+              <div class="inline-actions">
+                ${event.step_index !== null && event.step_index !== undefined ? `<span class="pill">step ${escapeHtml(event.step_index)}</span>` : ""}
+                ${event.tool_name ? `<span class="pill">${escapeHtml(event.tool_name)}</span>` : ""}
+                <span class="pill ${escapeHtml(event.tone)}">${escapeHtml(event.timestamp)}</span>
+              </div>
+            </div>
+            <details>
+              <summary>Technical details</summary>
+              <pre>${prettyJson(event.summary)}</pre>
+            </details>
+          </article>
+        `).join("");
+      }
+
+      function renderArtifacts(snapshot) {
+        const artifacts = snapshot.related_artifacts || [];
+        if (artifacts.length === 0) {
+          artifactsPanel.innerHTML = '<div class="empty">No matching artifacts have been linked yet.</div>';
+        } else {
+          artifactsPanel.innerHTML = artifacts.map((artifact) => `
+            <a class="artifact-card" href="${escapeHtml(artifact.url)}">
+              <div>
+                <strong>${escapeHtml(artifact.name)}</strong>
+                <div class="muted">${escapeHtml(artifact.relative_path)}</div>
+              </div>
+              <div>
+                <span class="pill">${escapeHtml(artifact.kind)}</span>
+                ${artifact.modified_at ? `<div class="muted">${escapeHtml(artifact.modified_at)}</div>` : ""}
+              </div>
+            </a>
+          `).join("");
+        }
+
+        logTailPanel.innerHTML = snapshot.log_tail
+          ? `<pre>${escapeHtml(snapshot.log_tail)}</pre>`
+          : '<div class="empty">No launch log output yet.</div>';
+      }
+
+      function applySnapshot(snapshot) {
+        currentSnapshot = snapshot;
+        if (snapshot.current_screenshot && !selectedScreenshot) {
+          selectedScreenshot = snapshot.current_screenshot.relative_path || "";
+        }
+        renderPreview(snapshot);
+        renderStatus(snapshot);
+        renderApprovalBanner(snapshot);
+        renderTimeline(snapshot);
+        renderArtifacts(snapshot);
+      }
+
+      async function fetchSnapshot() {
+        const response = await fetch(`/api/launches/${launchId}`, { headers: { "Accept": "application/json" } });
+        if (!response.ok) {
+          return;
+        }
+        applySnapshot(await response.json());
+      }
+
+      function startFallbackPolling() {
+        if (fallbackPoll !== null) {
+          return;
+        }
+        fallbackPoll = window.setInterval(() => {
+          fetchSnapshot().catch(() => {});
+        }, 3000);
+      }
+
+      function startEventSource() {
+        if (!window.EventSource) {
+          startFallbackPolling();
+          return;
+        }
+
+        eventSource = new EventSource(`/api/launches/${launchId}/stream`);
+        eventSource.addEventListener("snapshot", (event) => {
+          sourceErrors = 0;
+          applySnapshot(JSON.parse(event.data));
+        });
+        eventSource.addEventListener("heartbeat", () => {});
+        eventSource.onerror = () => {
+          sourceErrors += 1;
+          if (sourceErrors >= 2) {
+            eventSource.close();
+            startFallbackPolling();
+          }
+        };
+      }
+
+      applySnapshot(currentSnapshot);
+      startEventSource();
+    })();
+  </script>
 {% endblock %}
