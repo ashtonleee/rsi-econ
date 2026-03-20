@@ -91,7 +91,11 @@ class FakeBridgeAPI:
 class FakeLaunchManager:
     def __init__(self, settings: ConsoleSettings):
         self.settings = settings
-        self.plans = ["stage8_real_site_approval_demo.json", "stage6_browser_demo.json"]
+        self.plans = [
+            "stage8_real_site_approval_demo.json",
+            "stage6_browser_demo.json",
+            "stage6_answer_packet.json",
+        ]
         self.launches: dict[str, LaunchRecord] = {}
         self.snapshots: dict[str, dict] = {}
         self.raise_busy = False
@@ -401,8 +405,11 @@ def test_launches_page_renders_form_and_recent_launches(tmp_path: Path):
     assert response.status_code == 200
     assert "Start Agent" in response.text
     assert "stage8_real_site_approval_demo.json" in response.text
+    assert 'option value="stage6_answer_packet.json" selected' in response.text
+    assert "Best default for research" in response.text
     assert "name=\"launch_mode\"" in response.text
     assert "name=\"model\"" in response.text
+    assert '"requires_proposal_target_url": true' in response.text
     assert "launch-1" in response.text
 
 

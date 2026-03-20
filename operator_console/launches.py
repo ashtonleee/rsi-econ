@@ -244,7 +244,7 @@ class LaunchManager:
 
         related_artifacts: list[dict] = []
         summary_url = ""
-        latest_screenshot = self._latest_screenshot_for_launch(launch)
+        latest_screenshot = None
         if launch.summary_path:
             summary_url = f"/runs/{Path(launch.summary_path).name}"
             try:
@@ -263,6 +263,8 @@ class LaunchManager:
                                 "url": f"/artifacts/{artifact.relative_path}",
                             }
                             break
+        if latest_screenshot is None and launch.status in ACTIVE_LAUNCH_STATUSES:
+            latest_screenshot = self._latest_screenshot_for_launch(launch)
 
         return {
             "launch": launch.to_dict(),

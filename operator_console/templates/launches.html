@@ -29,10 +29,15 @@
           <div class="field">
             <label for="script">Script</label>
             <select id="script" name="script" required>
-              {% for script in launch_plans %}
-                <option value="{{ script }}">{{ script }}</option>
+              {% for plan in launch_plans %}
+                <option value="{{ plan.name }}" {% if plan.name == default_plan_name %}selected{% endif %}>{{ plan.name }}</option>
               {% endfor %}
             </select>
+            <div class="muted" id="script-summary">
+              {% if launch_plans %}
+                {{ launch_plans[0].summary }}
+              {% endif %}
+            </div>
           </div>
 
           <div class="field">
@@ -43,24 +48,27 @@
             </select>
           </div>
 
-          <div class="field">
+          <div class="field" id="model-field">
             <label for="model">Model (provider mode)</label>
             <input id="model" name="model" type="text" placeholder="openai/gpt-4.1-mini">
           </div>
 
-          <div class="field">
+          <div class="field" id="input-url-field">
             <label for="input_url">Input URL</label>
             <input id="input_url" name="input_url" type="url" placeholder="https://httpbin.org/html">
+            <div class="muted">The first page to open.</div>
           </div>
 
-          <div class="field">
+          <div class="field" id="follow-target-field">
             <label for="follow_target_url">Follow target URL</label>
             <input id="follow_target_url" name="follow_target_url" type="url" placeholder="https://example.com/next">
+            <div class="muted">A second page to follow to, only for one-hop follow scripts.</div>
           </div>
 
-          <div class="field">
+          <div class="field" id="proposal-target-field">
             <label for="proposal_target_url">Proposal target URL</label>
             <input id="proposal_target_url" name="proposal_target_url" type="url" placeholder="https://httpbin.org/post">
+            <div class="muted">Where an approved POST would go. Only used by approval/demo scripts.</div>
           </div>
 
           <div class="field">
@@ -90,6 +98,18 @@
         <div class="meta-row">
           <dt>Bridge token</dt>
           <dd>{{ "present" if request.app.state.settings.operator_token else "missing" }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Input URL</dt>
+          <dd>The first page to open.</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Follow target</dt>
+          <dd>A second URL to follow, only for follow-link plans.</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Proposal target</dt>
+          <dd>The destination for an approval-gated POST, only for approval/demo plans.</dd>
         </div>
       </div>
     </article>
@@ -135,4 +155,53 @@
       <div class="empty">No launches recorded yet. Start a seeded run above.</div>
     {% endif %}
   </section>
+
+  <script id="launch-plan-catalog" type="application/json">
+    [
+      {% for plan in launch_plans %}
+        {{ plan.to_dict() | tojson }}{% if not loop.last %},{% endif %}
+      {% endfor %}
+    ]
+  </script>
+  <script>
+    (() => {
+      const planCatalog = JSON.parse(document.getElementById("launch-plan-catalog").textContent);
+      const byName = Object.fromEntries(planCatalog.map((plan) => [plan.name, plan]));
+      const scriptSelect = document.getElementById("script");
+      const launchModeSelect = document.getElementById("launch_mode");
+      const scriptSummary = document.getElementById("script-summary");
+      const inputField = document.getElementById("input-url-field");
+      const followField = document.getElementById("follow-target-field");
+      const proposalField = document.getElementById("proposal-target-field");
+      const modelField = document.getElementById("model-field");
+      const inputControl = document.getElementById("input_url");
+      const followControl = document.getElementById("follow_target_url");
+      const proposalControl = document.getElementById("proposal_target_url");
+
+      function setFieldVisibility(field, control, visible, required) {
+        field.style.display = visible ? "" : "none";
+        control.required = required;
+      }
+
+      function syncScriptUI() {
+        const plan = byName[scriptSelect.value];
+        if (!plan) {
+          return;
+        }
+        scriptSummary.textContent = plan.summary;
+        setFieldVisibility(inputField, inputControl, plan.requires_input_url, plan.requires_input_url);
+        setFieldVisibility(followField, followControl, plan.requires_follow_target_url, plan.requires_follow_target_url);
+        setFieldVisibility(proposalField, proposalControl, plan.requires_proposal_target_url, plan.requires_proposal_target_url);
+      }
+
+      function syncModeUI() {
+        modelField.style.display = launchModeSelect.value === "provider" ? "" : "none";
+      }
+
+      scriptSelect.addEventListener("change", syncScriptUI);
+      launchModeSelect.addEventListener("change", syncModeUI);
+      syncScriptUI();
+      syncModeUI();
+    })();
+  </script>
 {% endblock %}

@@ -109,6 +109,81 @@ def test_list_run_summaries_sorts_newest_first(tmp_path: Path):
 
 
 @pytest.mark.fast
+def test_load_run_detail_uses_only_artifacts_written_by_that_run(tmp_path: Path):
+    workspace_dir, trusted_state_dir = make_workspace(tmp_path)
+    run_path = workspace_dir / "run_outputs" / "run-1.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "task": "summarize page",
+                "success": True,
+                "finished_reason": "planner_finished",
+                "steps_executed": 3,
+                "steps": [
+                    {"step_index": 0, "kind": "bridge_status", "params": {}, "result": {}},
+                    {
+                        "step_index": 1,
+                        "kind": "write_file",
+                        "params": {"path": "research/current_answer.md"},
+                        "result": {"path": "research/current_answer.md", "bytes_written": 42},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace_dir / "research" / "current_answer.md").write_text("# answer\n", encoding="utf-8")
+    (workspace_dir / "research" / "older_brief.md").write_text("# old\n", encoding="utf-8")
+
+    repo = RepoData(
+        ConsoleSettings(
+            bridge_url="http://127.0.0.1:8000",
+            operator_token="token",
+            workspace_dir=workspace_dir,
+            trusted_state_dir=trusted_state_dir,
+        )
+    )
+    detail = repo.load_run_detail("run-1.json")
+
+    assert [artifact.relative_path for artifact in detail.related_artifacts] == ["research/current_answer.md"]
+
+
+@pytest.mark.fast
+def test_load_run_detail_does_not_attach_stale_artifacts_on_failed_run(tmp_path: Path):
+    workspace_dir, trusted_state_dir = make_workspace(tmp_path)
+    run_path = workspace_dir / "run_outputs" / "failed.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "task": "describe page",
+                "success": False,
+                "finished_reason": "error",
+                "steps_executed": 2,
+                "steps": [
+                    {"step_index": 0, "kind": "bridge_status", "params": {}, "result": {}},
+                    {"step_index": 1, "kind": "error", "params": {}, "result": {"detail": "403"}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace_dir / "research" / "current_real_site_brief.md").write_text("# stale\n", encoding="utf-8")
+    (workspace_dir / "research" / "current_real_site_screenshot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    repo = RepoData(
+        ConsoleSettings(
+            bridge_url="http://127.0.0.1:8000",
+            operator_token="token",
+            workspace_dir=workspace_dir,
+            trusted_state_dir=trusted_state_dir,
+        )
+    )
+    detail = repo.load_run_detail("failed.json")
+
+    assert detail.related_artifacts == []
+
+
+@pytest.mark.fast
 def test_artifact_kind_detects_markdown_text_and_image(tmp_path: Path):
     markdown_path = tmp_path / "brief.md"
     text_path = tmp_path / "payload.json"
