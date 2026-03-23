@@ -14,6 +14,12 @@ SUPERVISOR_PATH = ROOT / "sandbox" / "supervisor.py"
 
 def load_supervisor(tmp_path: Path):
     os.environ["RSI_AGENT_WORKSPACE"] = str(tmp_path)
+    # Set backup/baseline dirs OUTSIDE workspace so git add -A doesn't pick them up
+    parent = tmp_path.parent
+    backup_dir = parent / f"_backups_{tmp_path.name}"
+    backup_dir.mkdir(exist_ok=True)
+    os.environ["RSI_BACKUP_DIR"] = str(backup_dir)
+    os.environ["RSI_BASELINE_DIR"] = str(parent / f"_baseline_{tmp_path.name}")
     spec = importlib.util.spec_from_file_location(f"test_supervisor_{tmp_path.name}", SUPERVISOR_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

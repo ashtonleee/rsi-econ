@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,9 @@ PUSH_REQUESTED_PATH = WORKSPACE / ".push_requested"
 CRASH_WINDOW_SECONDS = int(os.getenv("RSI_CRASH_WINDOW_SECONDS", "30"))
 RESUME_POLL_SECONDS = int(os.getenv("RSI_RESUME_POLL_SECONDS", "5"))
 RESTART_STOP_TIMEOUT_SECONDS = int(os.getenv("RSI_RESTART_STOP_TIMEOUT_SECONDS", "10"))
+BASELINE_DIR = Path(os.getenv("RSI_BASELINE_DIR", "/opt/baseline"))
+BACKUP_DIR = Path(os.getenv("RSI_BACKUP_DIR", "/var/lib/rsi/backups"))
+MAX_BACKUPS = 10
 
 CURRENT_PROCESS: subprocess.Popen[str] | None = None
 SHUTDOWN_REQUESTED = False
@@ -52,6 +57,108 @@ def run_git_checked(event: str, message: str, *args: str) -> bool:
     return False
 
 
+def validate_agent_code() -> bool:
+    """Syntax-check main.py before allowing restart with new code."""
+    result = subprocess.run(
+        [sys.executable, "-c", f"import py_compile; py_compile.compile('{MAIN_PATH}', doraise=True)"],
+        cwd=str(WORKSPACE),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown compile error"
+        log("VALIDATION_FAILED", f"syntax error in {MAIN_PATH}: {detail[:200]}")
+        return False
+    return True
+
+
+def backup_workspace() -> None:
+    """Create a tarball snapshot of the workspace before self-edit commits."""
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    tarball_path = BACKUP_DIR / f"workspace-{timestamp}.tar.gz"
+    try:
+        with tarfile.open(str(tarball_path), "w:gz") as tar:
+            tar.add(str(WORKSPACE), arcname="workspace")
+        log("BACKUP", f"created {tarball_path.name}")
+    except Exception as exc:
+        log("BACKUP_FAILED", f"could not create backup: {exc}")
+        return
+    # Rotate: keep only the newest MAX_BACKUPS
+    backups = sorted(BACKUP_DIR.glob("workspace-*.tar.gz"))
+    while len(backups) > MAX_BACKUPS:
+        oldest = backups.pop(0)
+        try:
+            oldest.unlink()
+        except Exception:
+            pass
+
+
+def check_git_integrity() -> bool:
+    """Run git fsck to verify repo integrity after a commit."""
+    result = run_git("fsck", "--no-dangling")
+    if result.returncode == 0:
+        return True
+    log("GIT_FSCK", f"integrity check failed: {result.stderr.strip()[:200]}")
+    run_git("gc", "--auto")
+    result = run_git("fsck", "--no-dangling")
+    if result.returncode == 0:
+        log("GIT_FSCK", "integrity restored after gc")
+        return True
+    log("GIT_FSCK", "integrity check still failing after gc")
+    return False
+
+
+def restore_from_backup() -> bool:
+    """Restore workspace from the latest tarball backup."""
+    backups = sorted(BACKUP_DIR.glob("workspace-*.tar.gz"))
+    if not backups:
+        log("RESTORE", "no backups available")
+        return False
+    latest = backups[-1]
+    try:
+        for item in WORKSPACE.iterdir():
+            if item.name == ".git":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+        with tarfile.open(str(latest), "r:gz") as tar:
+            for member in tar.getmembers():
+                if member.name.startswith("workspace/"):
+                    member.name = member.name[len("workspace/"):]
+                    if member.name and member.name != ".git" and not member.name.startswith(".git/"):
+                        tar.extract(member, str(WORKSPACE))
+        log("RESTORE", f"restored from {latest.name}")
+        run_git("add", "-A")
+        run_git("commit", "-m", "restored from backup")
+        return True
+    except Exception as exc:
+        log("RESTORE_FAILED", f"could not restore from backup: {exc}")
+        return False
+
+
+def restore_from_baseline() -> bool:
+    """Nuclear restore: copy read-only baseline files into workspace."""
+    if not BASELINE_DIR.exists():
+        log("RESTORE", "no baseline directory available")
+        return False
+    try:
+        for item in BASELINE_DIR.iterdir():
+            if item.is_file():
+                shutil.copy2(str(item), str(WORKSPACE / item.name))
+        run_git("add", "-A")
+        run_git("commit", "-m", "restored from baseline (nuclear)")
+        log("RESTORE", "restored from baseline")
+        return True
+    except Exception as exc:
+        log("RESTORE_FAILED", f"could not restore from baseline: {exc}")
+        return False
+
+
 def ensure_repo() -> bool:
     if (WORKSPACE / ".git").exists():
         return True
@@ -69,6 +176,8 @@ def ensure_repo() -> bool:
 def commit_restart() -> bool | None:
     if RESTART_PATH.exists():
         RESTART_PATH.unlink()
+    # Backup workspace state BEFORE git operations
+    backup_workspace()
     if not run_git_checked("PAUSED", "git add failed during self-edit commit", "add", "-A"):
         return None
     status = run_git("status", "--porcelain")
@@ -94,6 +203,17 @@ def commit_restart() -> bool | None:
         PUSH_REQUESTED_PATH.write_text(timestamp + "\n", encoding="utf-8")
     except OSError:
         pass
+    # Validate syntax before restarting with new code
+    if not validate_agent_code():
+        revert_last_commit()
+        log("VALIDATION_REVERTED", "reverted self-edit due to syntax error")
+        return False
+    # Verify git integrity after commit
+    if not check_git_integrity():
+        log("GIT_CORRUPT", "git integrity check failed, attempting restore")
+        if not restore_from_backup():
+            restore_from_baseline()
+        return False
     return True
 
 

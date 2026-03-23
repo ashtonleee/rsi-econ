@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir playwright requests httpx beautifulsoup4 lxml \
     && playwright install chromium
 
-RUN mkdir -p /workspace/agent /opt/supervisor
+RUN mkdir -p /workspace/agent /opt/supervisor /var/lib/rsi/backups
 
 WORKDIR /workspace/agent
 

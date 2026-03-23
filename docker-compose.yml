@@ -105,6 +105,8 @@ services:
     volumes:
       - ./sandbox/seed:/workspace/agent
       - ./sandbox/supervisor.py:/opt/supervisor/supervisor.py:ro
+      - ./sandbox/baseline:/opt/baseline:ro
+      - ./state/backups:/var/lib/rsi/backups
       - proxy-ca-cert:/usr/local/share/ca-certificates:ro
       - ./shared/chromium-seccomp.json:/opt/chromium-seccomp.json:ro
     pids_limit: 256

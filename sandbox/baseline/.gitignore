@@ -1,0 +1,10 @@
+history.jsonl
+.restart_requested
+.push_requested
+.paused
+.resume
+__pycache__/
+screenshot.png
+knowledge.json
+cache.json
+last_compaction_summary.md

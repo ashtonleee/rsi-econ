@@ -17,5 +17,6 @@ sandbox/seed/session_summary.txt
 sandbox/seed/last_compaction_summary.md
 sandbox/seed/cache.py
 sandbox/seed/cache_data/
+state/backups/*.tar.gz
 .claude/worktrees/
 .DS_Store

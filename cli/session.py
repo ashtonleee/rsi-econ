@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from urllib import request as urllib_request
 
 
 SEED_DIR = Path(__file__).resolve().parents[1] / "sandbox" / "seed"
+BASELINE_DIR = Path(__file__).resolve().parents[1] / "sandbox" / "baseline"
 COMPOSE_FILE = Path(__file__).resolve().parents[1] / "docker-compose.yml"
 WALLET_URL = "http://localhost:8081"
 
@@ -208,6 +210,29 @@ def cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_restore_baseline(_args: argparse.Namespace) -> int:
+    if not BASELINE_DIR.exists():
+        print(f"Error: baseline directory not found at {BASELINE_DIR}", file=sys.stderr)
+        return 1
+
+    print("Stopping sandbox...")
+    docker_compose("stop", "sandbox")
+
+    for item in BASELINE_DIR.iterdir():
+        if item.is_file():
+            dest = SEED_DIR / item.name
+            shutil.copy2(str(item), str(dest))
+            print(f"  restored: {item.name}")
+
+    git("add", "-A")
+    git("commit", "-m", "restored from baseline")
+
+    print("Starting sandbox...")
+    docker_compose("start", "sandbox")
+    print("Baseline restored successfully.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="RSI-Econ session management")
     sub = parser.add_subparsers(dest="command")
@@ -226,6 +251,8 @@ def main() -> int:
     fork_p.add_argument("branch", help="Source branch to fork from")
     fork_p.add_argument("--name", help="New session name")
 
+    sub.add_parser("restore-baseline", help="Restore seed to baseline (nuclear reset)")
+
     args = parser.parse_args()
     commands = {
         "status": cmd_status,
@@ -235,6 +262,7 @@ def main() -> int:
         "list": cmd_list,
         "push": cmd_push,
         "fork": cmd_fork,
+        "restore-baseline": cmd_restore_baseline,
     }
 
     if args.command not in commands:
