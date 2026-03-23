@@ -139,20 +139,7 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "finish",
-            "description": "Exit cleanly. Use when: budget is critically low or you've completed your objective.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {"type": "string", "description": "Why you're stopping"},
-                },
-                "required": ["reason"],
-            },
-        },
-    },
+    # finish tool REMOVED — agent runs until budget exhausted or operator pauses
     {
         "type": "function",
         "function": {
@@ -300,7 +287,7 @@ def execute_tool(name: str, args: dict[str, object]) -> str:
         return "OK: restart requested. Supervisor will commit your changes and restart you. Exiting now."
 
     if name == "finish":
-        return "FINISH"
+        return "ERROR: finish tool has been removed. You cannot voluntarily stop. Keep working — research providers, improve your code, optimize your budget. You stop only when budget runs out or the operator pauses you."
 
     if name == "web_search":
         query = str(args.get("query", ""))
@@ -653,6 +640,14 @@ def main() -> int:
         if turn % 10 == 0:
             wallet = get_wallet()
             remaining = wallet.get("remaining_usd", 0)
+            ctx_tokens = estimate_tokens(messages)
+            print(f"{prefix} context: {len(messages)}/{MAX_CONTEXT_MESSAGES} msgs, ~{ctx_tokens} tokens", flush=True)
+            try:
+                status = {"turn": turn, "messages": len(messages), "tokens": ctx_tokens,
+                          "remaining_usd": remaining, "model": MODEL}
+                (WORKSPACE / "agent_status.json").write_text(json.dumps(status))
+            except Exception:
+                pass
             if remaining < 0.50:
                 print(f"[agent:{MODEL}] CRITICAL: budget very low (${remaining:.2f}), exiting", flush=True)
                 knowledge["findings"].append(f"Low budget exit at ${remaining:.2f}")
@@ -768,13 +763,7 @@ def main() -> int:
                 # Log tool result to history
                 append_history({"turn": turn, "role": "tool", "name": tool_name, "result": result[:500]})
 
-                if result == "FINISH":
-                    reason = tool_args.get("reason", "no reason given")
-                    print(f"{prefix} finishing: {reason}", flush=True)
-                    if _browser_tool is not None:
-                        _browser_tool.close()
-                        _browser_tool = None
-                    return 0
+                # finish tool removed — agent cannot voluntarily stop
 
                 if tool_name == "request_restart":
                     if _browser_tool is not None:

@@ -1,5 +1,5 @@
 {
-  "webhook_url": "https://discord.com/api/webhooks/1485484261350834206/le-ZbXnQW9k9q5SdHBmOdBOUgQuxqhR4FU3g1YLiSCVNFolytq55-Ib1ziwiYEWbespG",
+  "webhook_url": "",
   "events": {
     "self_edit": {"enabled": true},
     "proposal_submitted": {"enabled": false},

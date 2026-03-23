@@ -19,6 +19,7 @@ from uuid import uuid4
 from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import Response
 
 try:
     from notifier import notify, process_event_files
@@ -423,6 +424,7 @@ def create_app(
         workspace_dir=Path(os.getenv("GIT_WORKSPACE_DIR", "/var/lib/rsi/workspace")),
         seed_dir=Path(os.getenv("SEED_DIR", "/opt/seed")),
     )
+    app.state.litellm_base_url = litellm_base_url or default_litellm_base_url
     app.state.operator_messages_dir = Path(os.getenv("OPERATOR_MESSAGES_DIR", "/var/lib/rsi/operator_messages"))
     app.state.operator_messages_dir.mkdir(parents=True, exist_ok=True)
     app.state._budget_warned_25 = False
@@ -576,6 +578,76 @@ def create_app(
     @app.post("/git/push")
     def git_push() -> dict[str, Any]:
         return app.state.git_manager.push()
+
+    # --- Operator tooling endpoints ---
+
+    @app.post("/summarize")
+    def summarize(payload: dict[str, Any]) -> dict[str, Any]:
+        """LLM-powered summary of agent activity. Cost tracked separately from agent budget."""
+        text = str(payload.get("text", ""))[:4000]
+        max_tokens = int(payload.get("max_tokens", 150))
+        if not text.strip():
+            return {"summary": "(no content to summarize)"}
+        body = json.dumps({
+            "model": "default",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Summarize what this AI agent is doing in 2-3 concise sentences. "
+                        "Focus on actions taken and discoveries made. "
+                        "Be specific about provider names and findings."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            "max_tokens": max_tokens,
+        }).encode("utf-8")
+        try:
+            req = urllib_request.Request(
+                f"{app.state.litellm_base_url}/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib_request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            summary = result["choices"][0]["message"]["content"]
+            return {"summary": summary}
+        except Exception as exc:
+            return {"summary": f"(summarization failed: {exc})"}
+
+    @app.get("/agent/screenshot")
+    def agent_screenshot() -> Response:
+        """Serve the latest browser screenshot from the agent workspace."""
+        ws = Path(os.getenv("GIT_WORKSPACE_DIR", "/var/lib/rsi/workspace"))
+        path = ws / "latest_screenshot.png"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="no screenshot available")
+        age = time.time() - path.stat().st_mtime
+        if age > 300:
+            raise HTTPException(status_code=404, detail="screenshot stale (>5 min)")
+        return Response(content=path.read_bytes(), media_type="image/png")
+
+    @app.get("/agent/status")
+    def agent_status() -> dict[str, Any]:
+        """Serve agent context info from the workspace volume."""
+        ws = Path(os.getenv("GIT_WORKSPACE_DIR", "/var/lib/rsi/workspace"))
+        result: dict[str, Any] = {}
+        kpath = ws / "knowledge.json"
+        if kpath.exists():
+            try:
+                result["knowledge"] = json.loads(kpath.read_text("utf-8"))
+            except Exception:
+                pass
+        spath = ws / "agent_status.json"
+        if spath.exists():
+            try:
+                result["agent_status"] = json.loads(spath.read_text("utf-8"))
+            except Exception:
+                pass
+        result["paused"] = (ws / ".paused").exists()
+        return result
 
     return app
 

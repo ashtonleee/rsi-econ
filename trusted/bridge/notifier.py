@@ -84,6 +84,9 @@ def notify(event_type: str, message: str, data: dict | None = None) -> bool:
 
 def process_event_files() -> None:
     """Read and process supervisor event files, send notifications, delete processed."""
+    config = load_config()
+    if not config.get("webhook_url", "").strip():
+        return  # No webhook configured; leave events for external consumer (Discord bot)
     if not EVENTS_DIR.exists():
         return
     for event_file in sorted(EVENTS_DIR.glob("*.json")):

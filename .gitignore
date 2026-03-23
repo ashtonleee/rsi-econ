@@ -20,5 +20,6 @@ sandbox/seed/cache_data/
 state/backups/*.tar.gz
 state/events/*.json
 state/operator_messages/*.jsonl
+state/notification_config.json
 .claude/worktrees/
 .DS_Store
