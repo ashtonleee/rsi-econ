@@ -16,6 +16,15 @@ from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
 
+try:
+    from notifier import notify, process_event_files
+except ImportError:
+    # Fallback for testing outside Docker
+    def notify(event_type: str, message: str, data: dict | None = None) -> bool:
+        return False
+    def process_event_files() -> None:
+        pass
+
 
 LOGGER = logging.getLogger(__name__)
 MODEL_CACHE_TTL_SECONDS = 60.0
@@ -274,13 +283,31 @@ def create_app(
         litellm_base_url=litellm_base_url or default_litellm_base_url,
     )
 
+    app.state.operator_messages_dir = Path(os.getenv("OPERATOR_MESSAGES_DIR", "/var/lib/rsi/operator_messages"))
+    app.state.operator_messages_dir.mkdir(parents=True, exist_ok=True)
+    app.state._budget_warned_25 = False
+    app.state._budget_warned_10 = False
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
+        process_event_files()
         return {"status": "ok"}
 
     @app.post("/llm_usage")
     def llm_usage(payload: Any = Body(...)) -> dict[str, str]:
         app.state.spend_tracker.record_usage(payload)
+        # Check budget thresholds for notifications
+        w = app.state.spend_tracker.wallet_payload()
+        budget = w.get("budget_usd", 0)
+        remaining = w.get("remaining_usd", 0)
+        if budget > 0:
+            pct = (remaining / budget) * 100
+            if pct <= 10 and not app.state._budget_warned_10:
+                app.state._budget_warned_10 = True
+                notify("budget_critical", f"Budget CRITICAL: {pct:.0f}% (${remaining:.2f} remaining)")
+            elif pct <= 25 and not app.state._budget_warned_25:
+                app.state._budget_warned_25 = True
+                notify("budget_warning", f"Budget warning: {pct:.0f}% (${remaining:.2f} remaining)")
         return {"status": "ok"}
 
     @app.get("/wallet")
@@ -301,6 +328,7 @@ def create_app(
             record["domain"] = domain
         path = _proposal_path(app.state.proposals_dir, proposal_id)
         _write_json(path, record)
+        notify("proposal_submitted", f"Proposal: {domain or 'unknown'} ({payload.get('method', '?')} {payload.get('url', '?')[:80]})")
         return {"proposal_id": proposal_id}
 
     @app.get("/proposals")
@@ -324,6 +352,7 @@ def create_app(
         if domain:
             _append_allowlist_domain(app.state.allowlist_path, domain)
         _write_json(path, record)
+        notify("proposal_approved", f"Approved: {domain or proposal_id[:8]}")
         return record
 
     @app.post("/proposals/{proposal_id}/reject")
@@ -343,6 +372,23 @@ def create_app(
     def proposal_status(proposal_id: str) -> dict[str, Any]:
         _path, record = _load_proposal_or_404(app.state.proposals_dir, proposal_id)
         return {"status": record.get("status", "pending")}
+
+    @app.post("/operator/inject")
+    def operator_inject(payload: dict[str, Any]) -> dict[str, str]:
+        message = str(payload.get("message", "")).strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+        entry = {
+            "timestamp": _utcnow(),
+            "message": message,
+            "model_override": payload.get("model_override"),
+        }
+        pending_path = app.state.operator_messages_dir / "pending.jsonl"
+        pending_path.parent.mkdir(parents=True, exist_ok=True)
+        with pending_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        notify("operator_injection", f"Operator: {message[:100]}")
+        return {"status": "queued"}
 
     return app
 

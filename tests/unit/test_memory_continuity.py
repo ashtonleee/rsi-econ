@@ -46,7 +46,7 @@ def test_history_written_on_tool_call(tmp_path: Path, monkeypatch) -> None:
         ]}}]},
     ])
 
-    monkeypatch.setattr(module, "chat", lambda messages, tools=None: next(responses))
+    monkeypatch.setattr(module, "chat", lambda messages, model=None, tools=None: next(responses))
     monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
     module.main()
 
@@ -62,7 +62,7 @@ def test_history_written_on_assistant(tmp_path: Path, monkeypatch) -> None:
     write_agent_workspace(tmp_path)
     module = load_seed_agent(tmp_path)
 
-    monkeypatch.setattr(module, "chat", lambda messages, tools=None: {
+    monkeypatch.setattr(module, "chat", lambda messages, model=None, tools=None: {
         "choices": [{"message": {"role": "assistant", "tool_calls": [
             {"id": "f1", "type": "function", "function": {"name": "finish", "arguments": '{"reason":"done"}'}}
         ]}}]
@@ -91,7 +91,7 @@ def test_previous_session_loaded(tmp_path: Path, monkeypatch) -> None:
     module = load_seed_agent(tmp_path)
     captured_messages: list = []
 
-    def fake_chat(messages, tools=None):
+    def fake_chat(messages, model=None, tools=None):
         captured_messages.extend(messages)
         return {"choices": [{"message": {"role": "assistant", "tool_calls": [
             {"id": "f1", "type": "function", "function": {"name": "finish", "arguments": '{"reason":"done"}'}}
@@ -112,7 +112,7 @@ def test_empty_history_skipped(tmp_path: Path, monkeypatch) -> None:
     module = load_seed_agent(tmp_path)
     captured_messages: list = []
 
-    def fake_chat(messages, tools=None):
+    def fake_chat(messages, model=None, tools=None):
         captured_messages.extend(messages)
         return {"choices": [{"message": {"role": "assistant", "tool_calls": [
             {"id": "f1", "type": "function", "function": {"name": "finish", "arguments": '{"reason":"done"}'}}

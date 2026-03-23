@@ -50,7 +50,7 @@ def test_agent_reads_system_prompt_as_system_message(tmp_path: Path, monkeypatch
     module = load_seed_agent(tmp_path)
     calls: list[list[dict[str, object]]] = []
 
-    def fake_chat(messages, tools=None):  # noqa: ANN001
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
         calls.append(messages)
         return {
             "choices": [
@@ -139,7 +139,7 @@ def test_agent_parses_tool_calls_and_executes_shell(tmp_path: Path, monkeypatch)
     )
     recorded_messages: list[list[dict[str, object]]] = []
 
-    def fake_chat(messages, tools=None):  # noqa: ANN001
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
         recorded_messages.append(messages.copy())
         return next(responses)
 
@@ -171,7 +171,7 @@ def test_request_restart_creates_marker_and_exits_cleanly(tmp_path: Path, monkey
     monkeypatch.setattr(
         module,
         "chat",
-        lambda messages, tools=None: {  # noqa: ARG005
+        lambda messages, model=None, tools=None: {  # noqa: ARG005
             "choices": [
                 {
                     "message": {
@@ -201,7 +201,7 @@ def test_finish_tool_exits_cleanly(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         module,
         "chat",
-        lambda messages, tools=None: {  # noqa: ARG005
+        lambda messages, model=None, tools=None: {  # noqa: ARG005
             "choices": [
                 {
                     "message": {
@@ -227,7 +227,7 @@ def test_http_429_causes_clean_exit(tmp_path: Path, monkeypatch) -> None:
     write_agent_workspace(tmp_path)
     module = load_seed_agent(tmp_path)
 
-    def raise_429(messages, tools=None):  # noqa: ANN001, ARG001
+    def raise_429(messages, model=None, tools=None):  # noqa: ANN001, ARG001
         raise urllib_error.HTTPError(module.LITELLM_URL, 429, "too many requests", {}, None)
 
     monkeypatch.setattr(module, "chat", raise_429)

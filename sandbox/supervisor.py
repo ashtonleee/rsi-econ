@@ -22,6 +22,7 @@ RESUME_POLL_SECONDS = int(os.getenv("RSI_RESUME_POLL_SECONDS", "5"))
 RESTART_STOP_TIMEOUT_SECONDS = int(os.getenv("RSI_RESTART_STOP_TIMEOUT_SECONDS", "10"))
 BASELINE_DIR = Path(os.getenv("RSI_BASELINE_DIR", "/opt/baseline"))
 BACKUP_DIR = Path(os.getenv("RSI_BACKUP_DIR", "/var/lib/rsi/backups"))
+EVENTS_DIR = Path(os.getenv("RSI_EVENTS_DIR", "/var/lib/rsi/events"))
 MAX_BACKUPS = 10
 
 CURRENT_PROCESS: subprocess.Popen[str] | None = None
@@ -35,6 +36,20 @@ def iso_now() -> str:
 
 def log(event: str, message: str) -> None:
     print(f"[supervisor] {iso_now()} {event}: {message}", flush=True)
+
+
+def write_event(event_type: str, message: str, data: dict | None = None) -> None:
+    """Write a JSON event file for the bridge notifier to pick up."""
+    try:
+        EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        path = EVENTS_DIR / f"{ts}_{event_type}.json"
+        payload: dict = {"event": event_type, "message": message, "timestamp": iso_now()}
+        if data:
+            payload["data"] = data
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        pass  # never crash supervisor for notifications
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -287,6 +302,7 @@ def launch_agent(after_edit: bool = False) -> int:
     while not SHUTDOWN_REQUESTED:
         start_time = time.time()
         log("START", f"launching {MAIN_PATH}")
+        write_event("session_start", f"Agent launched (edit={'yes' if current_after_edit else 'no'})")
         CURRENT_PROCESS = POPEN([sys.executable, str(MAIN_PATH)], cwd=str(WORKSPACE), text=True)
         exit_code = wait_for_process(CURRENT_PROCESS)
         CURRENT_PROCESS = None
@@ -294,6 +310,7 @@ def launch_agent(after_edit: bool = False) -> int:
 
         if SHUTDOWN_REQUESTED:
             log("EXIT", "supervisor shutting down")
+            write_event("session_stop", "Supervisor shutting down (signal)")
             return 0
 
         if RESTART_PATH.exists():
@@ -306,11 +323,15 @@ def launch_agent(after_edit: bool = False) -> int:
                 return 0
             crash_counter = 0
             current_after_edit = bool(commit_result)
+            if commit_result:
+                diff_stat = run_git("diff", "--stat", "HEAD~1").stdout.strip()
+                write_event("self_edit", f"Self-edited: {diff_stat[:200] or 'unknown changes'}")
             log("RESTART", "agent self-edited, restarting with new code")
             continue
 
         if exit_code == 0:
             log("EXIT", "agent exited cleanly")
+            write_event("session_stop", "Agent exited cleanly")
             try:
                 PUSH_REQUESTED_PATH.write_text("clean-exit\n", encoding="utf-8")
             except OSError:

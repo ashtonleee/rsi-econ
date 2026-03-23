@@ -72,7 +72,7 @@ def test_status_formats_output(cli, git_repo, capsys) -> None:
     assert result == 0
     output = capsys.readouterr().out
     assert "Session:" in output
-    assert "State:" in output
+    assert "Status:" in output
 
 
 def test_new_creates_session_branch(cli, git_repo) -> None:

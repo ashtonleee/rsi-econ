@@ -18,5 +18,7 @@ sandbox/seed/last_compaction_summary.md
 sandbox/seed/cache.py
 sandbox/seed/cache_data/
 state/backups/*.tar.gz
+state/events/*.json
+state/operator_messages/*.jsonl
 .claude/worktrees/
 .DS_Store

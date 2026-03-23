@@ -16,6 +16,7 @@ WORKSPACE = Path(os.getenv("RSI_AGENT_WORKSPACE", "/workspace/agent"))
 SYSTEM_PROMPT_PATH = WORKSPACE / "SYSTEM.md"
 HISTORY_PATH = WORKSPACE / "history.jsonl"
 KNOWLEDGE_PATH = WORKSPACE / "knowledge.json"
+OPERATOR_MESSAGES_PATH = Path(os.getenv("RSI_OPERATOR_MESSAGES", "/workspace/operator_messages/pending.jsonl"))
 LITELLM_URL = os.getenv("LITELLM_URL", "http://litellm:4000")
 WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
 
@@ -476,6 +477,29 @@ def build_system_prompt(knowledge: dict, wallet: dict) -> str:
     return base + state
 
 
+def check_operator_messages(messages: list[dict]) -> str | None:
+    """Check for and consume operator messages. Returns model override if any."""
+    if not OPERATOR_MESSAGES_PATH.exists():
+        return None
+    model_override = None
+    try:
+        lines = OPERATOR_MESSAGES_PATH.read_text(encoding="utf-8").strip().split("\n")
+        for line in lines:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            msg = entry.get("message", "")
+            if msg:
+                messages.append({"role": "user", "content": f"[OPERATOR] {msg}"})
+                print(f"[agent] operator message: {msg[:100]}", flush=True)
+            if entry.get("model_override"):
+                model_override = entry["model_override"]
+        OPERATOR_MESSAGES_PATH.unlink()
+    except Exception as exc:
+        print(f"[agent] error reading operator messages: {exc}", flush=True)
+    return model_override
+
+
 def load_recent_history() -> list[dict]:
     """Load recent history entries for continuity across restarts."""
     if not HISTORY_PATH.exists():
@@ -552,12 +576,36 @@ def main() -> int:
             if tokens > COMPACTION_TOKEN_THRESHOLD:
                 messages = compact_context(messages, knowledge)
 
+        # Check for operator messages
+        model_override = check_operator_messages(messages)
+
         try:
-            response = chat(messages, tools=TOOLS)
+            response = chat(messages, model=model_override, tools=TOOLS)
         except Exception as exc:
             if "429" in str(exc):
-                print(f"{prefix} 429 — budget exhausted, exiting", flush=True)
-                break
+                # Distinguish rate-limit from budget exhaustion
+                error_body = ""
+                if hasattr(exc, "read"):
+                    try:
+                        error_body = exc.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        pass
+                is_rate_limit = any(
+                    kw in error_body.lower()
+                    for kw in ["rate limit", "rate_limit", "retry-after", "too many requests"]
+                )
+                if is_rate_limit:
+                    retry_after = 10
+                    if hasattr(exc, "headers"):
+                        ra = exc.headers.get("retry-after", "")
+                        if ra.isdigit():
+                            retry_after = min(int(ra), 60)
+                    print(f"{prefix} rate limited, waiting {retry_after}s", flush=True)
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    print(f"{prefix} 429 — budget exhausted, exiting", flush=True)
+                    break
             consecutive_errors = getattr(main, '_consecutive_errors', 0) + 1
             main._consecutive_errors = consecutive_errors
             print(f"{prefix} API error #{consecutive_errors}: {exc}", flush=True)

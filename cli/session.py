@@ -41,6 +41,21 @@ def docker_compose(*args: str) -> subprocess.CompletedProcess[str]:
     return run(["docker", "compose", "-f", str(COMPOSE_FILE), *args])
 
 
+def budget_bar(pct: float, width: int = 18) -> str:
+    """Render a text progress bar for budget remaining."""
+    filled = int(pct / 100 * width)
+    bar = "\u2588" * filled + "\u2591" * (width - filled)
+    if pct > 50:
+        phase = "FULL"
+    elif pct > 20:
+        phase = "MODERATE"
+    elif pct > 5:
+        phase = "CONSERVE"
+    else:
+        phase = "WRAPUP"
+    return f"{bar} {phase}"
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     # Sandbox running?
     ps = docker_compose("ps", "--format", "json", "sandbox")
@@ -54,34 +69,86 @@ def cmd_status(_args: argparse.Namespace) -> int:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # Git info
-    branch = git("branch", "--show-current")
-    branch_name = branch.stdout.strip() or "(detached)"
-    log = git("rev-list", "--count", "HEAD")
-    commit_count = log.stdout.strip() or "?"
-    last_commit = git("log", "-1", "--format=%h %s (%cr)")
-    last_commit_info = last_commit.stdout.strip() or "none"
+    paused = (SEED_DIR / ".paused").exists()
+    state = "PAUSED" if paused else ("RUNNING" if running else "STOPPED")
 
-    # Paused?
-    paused_path = SEED_DIR / ".paused"
-    paused = paused_path.exists()
+    # Git info
+    branch_name = git("branch", "--show-current").stdout.strip() or "(detached)"
+    commit_count = git("rev-list", "--count", "HEAD").stdout.strip() or "?"
+    last_commit = git("log", "-1", "--format=%h %s (%cr)").stdout.strip() or "none"
 
     # Wallet
-    remaining = "?"
+    budget_str = "? / ?"
+    bar_str = ""
+    model_str = "?"
     try:
         req = urllib_request.Request(f"{WALLET_URL}/wallet", method="GET")
         with urllib_request.urlopen(req, timeout=5) as resp:
             wallet = json.loads(resp.read().decode("utf-8"))
-            remaining = f"${wallet.get('remaining_usd', 0):.2f}"
+            rem = wallet.get("remaining_usd", 0)
+            total = wallet.get("budget_usd", 0)
+            pct = (rem / total * 100) if total > 0 else 0
+            budget_str = f"${rem:.2f} / ${total:.2f} ({pct:.0f}%)"
+            bar_str = budget_bar(pct)
+            models = wallet.get("models_available", [])
+            model_str = models[0] if models else "unknown"
     except Exception:
         pass
 
-    state = "paused" if paused else ("running" if running else "stopped")
-    print(f"Session:     {branch_name}")
-    print(f"State:       {state}")
-    print(f"Commits:     {commit_count}")
-    print(f"Budget:      {remaining}")
-    print(f"Last commit: {last_commit_info}")
+    # Proposals
+    proposal_str = "?"
+    try:
+        req = urllib_request.Request(f"{WALLET_URL}/proposals", method="GET")
+        with urllib_request.urlopen(req, timeout=5) as resp:
+            proposals = json.loads(resp.read().decode("utf-8"))
+            counts = {"pending": 0, "approved": 0, "rejected": 0}
+            for p in proposals:
+                s = p.get("status", "pending")
+                if s in counts:
+                    counts[s] += 1
+            proposal_str = f"{counts['pending']} pending, {counts['approved']} approved, {counts['rejected']} rejected"
+    except Exception:
+        pass
+
+    # Knowledge findings
+    findings_count = 0
+    k_path = SEED_DIR / "knowledge.json"
+    if k_path.exists():
+        try:
+            k = json.loads(k_path.read_text(encoding="utf-8"))
+            findings_count = len(k.get("findings", []))
+        except Exception:
+            pass
+
+    # Webhook
+    webhook_str = "not configured"
+    config_path = Path(__file__).resolve().parents[1] / "state" / "notification_config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            if cfg.get("webhook_url", "").strip():
+                webhook_str = "active (Discord)"
+            else:
+                webhook_str = "configured (no URL)"
+        except Exception:
+            pass
+
+    print(f"\u2550\u2550\u2550 RSI-ECON STATUS \u2550\u2550\u2550")
+    print(f"Session:    {branch_name}")
+    print(f"Status:     {state}")
+    print(f"Budget:     {budget_str}")
+    if bar_str:
+        print(f"            {bar_str}")
+    print(f"Model:      {model_str}")
+    print()
+    print(f"Git:        {commit_count} commits")
+    print(f"Last:       {last_commit}")
+    print()
+    print(f"Proposals:  {proposal_str}")
+    print(f"Findings:   {findings_count} entries in knowledge.json")
+    print()
+    print(f"Webhook:    {webhook_str}")
+    print("\u2550" * 23)
     return 0
 
 

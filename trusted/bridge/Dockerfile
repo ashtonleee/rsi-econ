@@ -8,6 +8,7 @@ ENV PYTHONUNBUFFERED=1
 RUN pip install --no-cache-dir fastapi uvicorn
 
 COPY trusted/bridge/wallet_api.py /app/wallet_api.py
+COPY trusted/bridge/notifier.py /app/notifier.py
 
 EXPOSE 8081
 
