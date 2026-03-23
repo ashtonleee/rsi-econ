@@ -7,3 +7,4 @@ __pycache__/
 screenshot.png
 knowledge.json
 cache.json
+last_compaction_summary.md

@@ -35,41 +35,15 @@ def test_estimate_tokens(tmp_path: Path) -> None:
     assert tokens > 50
 
 
-def test_extract_findings_urls(tmp_path: Path) -> None:
-    mod = load_seed_agent(tmp_path)
-    messages = [
-        {"role": "tool", "content": "Found https://example.com/api and https://test.org/free"},
-        {"role": "assistant", "content": "I found two URLs"},
-    ]
-    findings = mod.extract_findings(messages)
-    urls = [f for f in findings if f.startswith("URL:")]
-    assert len(urls) == 2
-    assert "URL: https://example.com/api" in findings
-
-
-def test_extract_findings_providers(tmp_path: Path) -> None:
-    mod = load_seed_agent(tmp_path)
-    messages = [
-        {"role": "tool", "content": "OpenAI offers GPT-4. Anthropic has Claude. Groq is fast."},
-    ]
-    findings = mod.extract_findings(messages)
-    providers = [f for f in findings if f.startswith("Provider:")]
-    assert len(providers) == 3
-
-
-def test_extract_findings_prices(tmp_path: Path) -> None:
-    mod = load_seed_agent(tmp_path)
-    messages = [
-        {"role": "tool", "content": "GPT-4 costs $0.03/1k tokens. Claude costs $0.01/1k."},
-    ]
-    findings = mod.extract_findings(messages)
-    prices = [f for f in findings if f.startswith("Price:")]
-    assert len(prices) == 2
-
-
-def test_compact_context_reduces_to_two_messages(tmp_path: Path) -> None:
+def test_compact_context_reduces_to_two_messages(tmp_path: Path, monkeypatch) -> None:
     mod = load_seed_agent(tmp_path)
     knowledge = mod.load_knowledge()
+
+    # Mock chat() so compaction doesn't need a real LLM
+    monkeypatch.setattr(mod, "chat", lambda messages, **kw: {
+        "choices": [{"message": {"role": "assistant", "content": "Summary: found groq free tier"}}]
+    })
+
     messages = [
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "Do something"},
@@ -77,7 +51,6 @@ def test_compact_context_reduces_to_two_messages(tmp_path: Path) -> None:
         {"role": "tool", "content": "Found https://api.groq.com free tier"},
         {"role": "assistant", "content": "Great"},
     ] * 10  # 50 messages
-    # Keep first message as system
     messages[0] = {"role": "system", "content": "You are an agent."}
     result = mod.compact_context(messages, knowledge)
     assert len(result) == 2
@@ -85,24 +58,68 @@ def test_compact_context_reduces_to_two_messages(tmp_path: Path) -> None:
     assert "CONTEXT COMPACTED" in result[1]["content"]
 
 
-def test_compact_context_saves_to_knowledge_json(tmp_path: Path) -> None:
+def test_compact_context_saves_summary_to_knowledge(tmp_path: Path, monkeypatch) -> None:
     mod = load_seed_agent(tmp_path)
     knowledge = mod.load_knowledge()
+
+    monkeypatch.setattr(mod, "chat", lambda messages, **kw: {
+        "choices": [{"message": {"role": "assistant", "content": "Found openrouter free models and groq API"}}]
+    })
+
     messages = [
         {"role": "system", "content": "You are an agent."},
-        {"role": "tool", "content": "https://openrouter.ai free access. Anthropic pricing $0.01"},
+        {"role": "tool", "content": "https://openrouter.ai free access"},
     ]
     mod.compact_context(messages, knowledge)
-    # Knowledge should be saved to disk
+
+    # Knowledge should have session_summaries
     k_path = tmp_path / "knowledge.json"
     assert k_path.exists()
     saved = json.loads(k_path.read_text())
-    assert any("openrouter" in f.lower() for f in saved["findings"])
+    assert "session_summaries" in saved
+    assert len(saved["session_summaries"]) == 1
+    assert "openrouter" in saved["session_summaries"][0]["summary"].lower()
+
+
+def test_compact_context_writes_summary_file(tmp_path: Path, monkeypatch) -> None:
+    mod = load_seed_agent(tmp_path)
+    knowledge = mod.load_knowledge()
+
+    monkeypatch.setattr(mod, "chat", lambda messages, **kw: {
+        "choices": [{"message": {"role": "assistant", "content": "My research summary"}}]
+    })
+
+    messages = [
+        {"role": "system", "content": "You are an agent."},
+        {"role": "user", "content": "research"},
+    ]
+    mod.compact_context(messages, knowledge)
+
+    summary_path = tmp_path / "last_compaction_summary.md"
+    assert summary_path.exists()
+    assert "My research summary" in summary_path.read_text()
+
+
+def test_compact_context_fallback_on_error(tmp_path: Path, monkeypatch) -> None:
+    mod = load_seed_agent(tmp_path)
+    knowledge = mod.load_knowledge()
+
+    def failing_chat(messages, **kw):
+        raise ConnectionError("LLM unavailable")
+
+    monkeypatch.setattr(mod, "chat", failing_chat)
+
+    messages = [
+        {"role": "system", "content": "You are an agent."},
+        {"role": "user", "content": "research"},
+    ]
+    result = mod.compact_context(messages, knowledge)
+    assert len(result) == 2
+    assert "summary generation failed" in result[1]["content"]
 
 
 def test_knowledge_loaded_at_startup(tmp_path: Path) -> None:
     mod = load_seed_agent(tmp_path)
-    # Pre-populate knowledge.json
     k_path = tmp_path / "knowledge.json"
     k_path.write_text(json.dumps({
         "version": 2,

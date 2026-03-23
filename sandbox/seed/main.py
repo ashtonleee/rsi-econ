@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -400,14 +399,10 @@ def trim_messages(messages: list[dict], max_messages: int = MAX_CONTEXT_MESSAGES
 COMPACTION_TURN_INTERVAL = 30
 COMPACTION_TOKEN_THRESHOLD = 80000
 
-# Patterns for extracting findings from tool results
-_URL_RE = re.compile(r'https?://[^\s"\'<>]+')
-_PRICE_RE = re.compile(r'\$\d+(?:\.\d{1,2})?(?:/\w+)?')
-_PROVIDER_RE = re.compile(
-    r'\b(?:openai|anthropic|google|cohere|mistral|groq|together|fireworks|'
-    r'replicate|huggingface|deepseek|perplexity|openrouter|anyscale|'
-    r'lepton|novita|cerebras)\b',
-    re.IGNORECASE,
+COMPACTION_PROMPT = (
+    "Summarize your key findings, current strategy, and next steps in under 300 words. "
+    "Include: provider names, pricing, free tiers discovered, what worked, what failed, "
+    "and what you should do next. This summary will be your only memory after context reset."
 )
 
 
@@ -416,58 +411,39 @@ def estimate_tokens(messages: list[dict]) -> int:
     return sum(len(json.dumps(m)) for m in messages) // 4
 
 
-def extract_findings(messages: list[dict]) -> list[str]:
-    """Extract URLs, prices, and provider names from tool result messages."""
-    findings: list[str] = []
-    seen: set[str] = set()
-    for msg in messages:
-        if msg.get("role") != "tool":
-            continue
-        content = msg.get("content", "")
-        urls = _URL_RE.findall(content)
-        prices = _PRICE_RE.findall(content)
-        providers = _PROVIDER_RE.findall(content)
-        for url in urls[:5]:
-            if url not in seen:
-                seen.add(url)
-                findings.append(f"URL: {url}")
-        for price in prices[:3]:
-            if price not in seen:
-                seen.add(price)
-                findings.append(f"Price: {price}")
-        for provider in providers:
-            name = provider.lower()
-            if name not in seen:
-                seen.add(name)
-                findings.append(f"Provider: {name}")
-    return findings
-
-
 def compact_context(messages: list[dict], knowledge: dict) -> list[dict]:
-    """Replace conversation history with a compact summary + saved findings."""
-    findings = extract_findings(messages)
+    """Use LLM to summarize conversation before context reset."""
+    # Build conversation snippet for summarization
+    snippet = "\n".join(
+        m.get("content", "")[:200] for m in messages[-20:] if m.get("content")
+    )
+    summary_messages = [
+        {"role": "system", "content": "You are summarizing an AI agent's research session."},
+        {"role": "user", "content": COMPACTION_PROMPT + "\n\nConversation to summarize:\n" + snippet},
+    ]
+    try:
+        response = chat(summary_messages)
+        summary = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception:
+        summary = "Context was compacted but summary generation failed."
 
-    # Merge into knowledge.json
-    existing = set(knowledge.get("findings", []))
-    for f in findings:
-        if f not in existing:
-            knowledge["findings"].append(f)
+    # Save summary to knowledge.json
+    knowledge.setdefault("session_summaries", []).append({
+        "turn": len(messages),
+        "summary": summary[:1000],
+    })
     save_knowledge(knowledge)
 
-    brief = "; ".join(findings[:20]) if findings else "no structured findings extracted"
-    summary_msg = {
-        "role": "user",
-        "content": (
-            f"[CONTEXT COMPACTED] Your earlier research findings have been saved to knowledge.json. "
-            f"Key findings so far: {brief}. Continue from where you left off."
-        ),
-    }
+    # Write summary to a persistent file too
+    summary_path = WORKSPACE / "last_compaction_summary.md"
+    summary_path.write_text(f"# Last Compaction Summary\n\n{summary}\n")
+
     old_count = len(messages)
-    new_messages = [messages[0], summary_msg]
-    print(
-        f"[agent] context compacted: {old_count} messages → 2, {len(findings)} findings saved",
-        flush=True,
-    )
+    new_messages = [
+        messages[0],
+        {"role": "user", "content": f"[CONTEXT COMPACTED] Your previous conversation was summarized to save context. Summary:\n\n{summary}\n\nContinue from where you left off."},
+    ]
+    print(f"[agent] context compacted: {old_count} messages → 2 (LLM summary)", flush=True)
     return new_messages
 
 
