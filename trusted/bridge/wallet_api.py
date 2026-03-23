@@ -649,6 +649,79 @@ def create_app(
         result["paused"] = (ws / ".paused").exists()
         return result
 
+    # --- Exa.ai search endpoint ---
+
+    @app.post("/search")
+    def search(payload: dict[str, Any]) -> dict[str, Any]:
+        """Proxy search queries to Exa.ai and return structured results."""
+        query = str(payload.get("query", "")).strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="query is required")
+        num_results = min(int(payload.get("num_results", 5)), 20)
+
+        exa_body = json.dumps({
+            "query": query,
+            "numResults": num_results,
+            "type": "auto",
+            "contents": {"text": {"maxCharacters": 1000}},
+        }).encode("utf-8")
+
+        headers = {"Content-Type": "application/json"}
+        exa_api_key = os.getenv("EXA_API_KEY", "").strip()
+        if exa_api_key:
+            headers["x-api-key"] = exa_api_key
+
+        search_log_path = Path("/var/log/rsi/search.jsonl")
+        try:
+            req = urllib_request.Request(
+                "https://api.exa.ai/search",
+                data=exa_body,
+                headers=headers,
+                method="POST",
+            )
+            with urllib_request.urlopen(req, timeout=15) as resp:
+                exa_response = json.loads(resp.read().decode("utf-8"))
+
+            results = []
+            for item in exa_response.get("results", []):
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "text": item.get("text", ""),
+                })
+
+            # Log the search
+            try:
+                search_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with search_log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "timestamp": _utcnow(),
+                        "query": query,
+                        "num_results": len(results),
+                        "success": True,
+                    }, sort_keys=True) + "\n")
+            except Exception:
+                pass
+
+            return {"results": results}
+
+        except Exception as exc:
+            # Log the failed search
+            try:
+                search_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with search_log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "timestamp": _utcnow(),
+                        "query": query,
+                        "num_results": 0,
+                        "success": False,
+                        "error": str(exc)[:200],
+                    }, sort_keys=True) + "\n")
+            except Exception:
+                pass
+
+            return {"results": [], "error": str(exc)[:200]}
+
     return app
 
 

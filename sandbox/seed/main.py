@@ -296,6 +296,22 @@ def execute_tool(name: str, args: dict[str, object]) -> str:
 
     if name == "web_search":
         query = str(args.get("query", ""))
+        # Try bridge Exa search first (structured, no CAPTCHA)
+        try:
+            body = json.dumps({"query": query, "num_results": 5}).encode()
+            req = urllib_request.Request(
+                f"{WALLET_URL}/search",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            resp = urllib_request.urlopen(req, timeout=10)
+            result = json.loads(resp.read())
+            if result.get("results"):
+                return truncate_output(json.dumps(result, indent=2))
+        except Exception:
+            pass
+        # Fallback to Playwright search
         engine = str(args.get("engine", "duckduckgo"))
         result = get_browser().search(query, engine)
         return truncate_output(json.dumps(result))
