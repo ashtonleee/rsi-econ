@@ -427,6 +427,8 @@ def create_app(
     app.state.litellm_base_url = litellm_base_url or default_litellm_base_url
     app.state.operator_messages_dir = Path(os.getenv("OPERATOR_MESSAGES_DIR", "/var/lib/rsi/operator_messages"))
     app.state.operator_messages_dir.mkdir(parents=True, exist_ok=True)
+    app.state.provider_proposals_dir = Path(os.getenv("PROVIDER_PROPOSALS_DIR", "/var/lib/rsi/provider_proposals"))
+    app.state.provider_proposals_dir.mkdir(parents=True, exist_ok=True)
     app.state._budget_warned_25 = False
     app.state._budget_warned_10 = False
 
@@ -535,6 +537,96 @@ def create_app(
             f.write(json.dumps(entry) + "\n")
         notify("operator_injection", f"Operator: {message[:100]}")
         return {"status": "queued"}
+
+    # --- Provider hot-add endpoints ---
+
+    @app.post("/providers/propose")
+    def propose_provider(payload: dict[str, Any]) -> dict[str, Any]:
+        """Agent proposes a new LLM provider for operator to add."""
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+
+        # Check for existing proposal with same name
+        for path in app.state.provider_proposals_dir.glob("*.json"):
+            try:
+                existing = _read_json(path)
+                if existing.get("name") == name:
+                    return {
+                        "proposal_id": existing.get("proposal_id", path.stem),
+                        "status": existing.get("status", "pending_operator"),
+                        "note": "duplicate — proposal already exists",
+                    }
+            except Exception:
+                continue
+
+        proposal_id = str(uuid4())
+        record = {
+            "proposal_id": proposal_id,
+            "name": name,
+            "provider": str(payload.get("provider", name)).strip(),
+            "model_id": str(payload.get("model_id", "")).strip(),
+            "signup_url": str(payload.get("signup_url", "")).strip(),
+            "free_tier": str(payload.get("free_tier", "")).strip(),
+            "needs_api_key": bool(payload.get("needs_api_key", True)),
+            "notes": str(payload.get("notes", "")).strip(),
+            "status": "pending_operator",
+            "created_at": _utcnow(),
+        }
+        _write_json(app.state.provider_proposals_dir / f"{proposal_id}.json", record)
+        notify("provider_proposed", f"New provider: {name} ({record['model_id'] or '?'})")
+        return {"proposal_id": proposal_id, "status": "pending_operator"}
+
+    @app.get("/providers")
+    def list_providers() -> dict[str, Any]:
+        """List active and proposed providers."""
+        # Active: derive from LiteLLM models
+        active = []
+        models = app.state.spend_tracker.models_available()
+        if models:
+            active.append({
+                "name": "openrouter",
+                "models": models,
+                "key_configured": True,
+            })
+
+        # Proposed: read proposal files
+        proposed = []
+        for path in sorted(app.state.provider_proposals_dir.glob("*.json")):
+            try:
+                record = _read_json(path)
+                proposed.append({
+                    "proposal_id": record.get("proposal_id", path.stem),
+                    "name": record.get("name", ""),
+                    "provider": record.get("provider", ""),
+                    "model_id": record.get("model_id", ""),
+                    "status": record.get("status", "pending_operator"),
+                    "signup_url": record.get("signup_url", ""),
+                    "free_tier": record.get("free_tier", ""),
+                })
+            except Exception:
+                continue
+        return {"active": active, "proposed": proposed}
+
+    @app.get("/providers/proposals/{proposal_id}")
+    def get_provider_proposal(proposal_id: str) -> dict[str, Any]:
+        path = app.state.provider_proposals_dir / f"{proposal_id}.json"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="provider proposal not found")
+        return _read_json(path)
+
+    @app.post("/providers/proposals/{proposal_id}/activate")
+    def activate_provider(proposal_id: str) -> dict[str, Any]:
+        """Mark a provider proposal as active (called by cli/providers.py after key setup)."""
+        path = app.state.provider_proposals_dir / f"{proposal_id}.json"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="provider proposal not found")
+        record = _read_json(path)
+        record["status"] = "active"
+        record["activated_at"] = _utcnow()
+        _write_json(path, record)
+        notify("provider_activated", f"Provider added: {record.get('name', '?')} — {record.get('model_id', '?')}")
+        return record
 
     # --- Git API endpoints (trusted git repo management) ---
 
@@ -648,6 +740,28 @@ def create_app(
                 pass
         result["paused"] = (ws / ".paused").exists()
         return result
+
+    @app.get("/agent/reasoning")
+    def agent_reasoning(lines: int = 5) -> dict[str, Any]:
+        """Return the last N entries from reasoning.jsonl."""
+        ws = Path(os.getenv("GIT_WORKSPACE_DIR", "/var/lib/rsi/workspace"))
+        rpath = ws / "reasoning.jsonl"
+        if not rpath.exists():
+            return {"entries": []}
+        try:
+            all_lines = rpath.read_text("utf-8").strip().split("\n")
+            tail = all_lines[-lines:] if lines > 0 else []
+            entries = []
+            for raw in tail:
+                if not raw.strip():
+                    continue
+                try:
+                    entries.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+            return {"entries": entries}
+        except Exception:
+            return {"entries": []}
 
     return app
 

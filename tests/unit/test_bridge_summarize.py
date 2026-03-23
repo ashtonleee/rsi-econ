@@ -230,3 +230,56 @@ def test_agent_status_returns_knowledge_and_status(tmp_path: Path) -> None:
     assert body["knowledge"]["findings"] == ["Found free tier at Groq"]
     assert body["agent_status"]["turn"] == 42
     assert body["paused"] is False
+
+
+def test_agent_reasoning_returns_entries(tmp_path: Path) -> None:
+    mod = load_wallet_api(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+
+    # Write reasoning.jsonl
+    entries = [
+        json.dumps({"turn": 1, "content": "First thought", "model": "m2.7"}),
+        json.dumps({"turn": 2, "content": "Second thought", "model": "m2.7"}),
+        json.dumps({"turn": 3, "content": "Third thought", "model": "m2.7"}),
+    ]
+    (workspace / "reasoning.jsonl").write_text("\n".join(entries) + "\n")
+
+    app = mod.create_app(
+        proposals_dir=tmp_path / "proposals",
+        usage_log_path=tmp_path / "llm_usage.jsonl",
+        allowlist_path=tmp_path / "proxy_allowlist.txt",
+        litellm_base_url="http://litellm-test:4000",
+        budget_usd=5.0,
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        resp = client.get("/agent/reasoning?lines=2")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["entries"]) == 2
+    assert body["entries"][0]["content"] == "Second thought"
+    assert body["entries"][1]["content"] == "Third thought"
+
+
+def test_agent_reasoning_empty_when_no_file(tmp_path: Path) -> None:
+    mod = load_wallet_api(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+
+    app = mod.create_app(
+        proposals_dir=tmp_path / "proposals",
+        usage_log_path=tmp_path / "llm_usage.jsonl",
+        allowlist_path=tmp_path / "proxy_allowlist.txt",
+        litellm_base_url="http://litellm-test:4000",
+        budget_usd=5.0,
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        resp = client.get("/agent/reasoning?lines=5")
+
+    assert resp.status_code == 200
+    assert resp.json()["entries"] == []
