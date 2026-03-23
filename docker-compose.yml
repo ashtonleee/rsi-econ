@@ -66,6 +66,7 @@ services:
       GIT_REPO_DIR: /var/lib/rsi/git-repo
       GIT_WORKSPACE_DIR: /var/lib/rsi/workspace
       SEED_DIR: /opt/seed
+      EXA_API_KEY: ${EXA_API_KEY:-}
     volumes:
       - ./state/proposals:/var/lib/rsi/proposals
       - ./state/logs:/var/log/rsi
