@@ -73,6 +73,7 @@ services:
       - ./state/proxy:/etc/rsi
       - ./state/events:/var/lib/rsi/events
       - ./state/operator_messages:/var/lib/rsi/operator_messages
+      - ./state/provider_proposals:/var/lib/rsi/provider_proposals
       - ./state/notification_config.json:/var/lib/rsi/notification_config.json:ro
       - git-repo:/var/lib/rsi/git-repo
       - agent-workspace:/var/lib/rsi/workspace

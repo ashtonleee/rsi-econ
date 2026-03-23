@@ -474,6 +474,10 @@ class RSIBot(discord.Client):
             pass  # Handled by reaction callbacks
         elif event_type == "finding":
             await self._handle_finding(message, data)
+        elif event_type == "provider_proposed":
+            await self._handle_provider_proposed(message)
+        elif event_type == "provider_activated":
+            await self._handle_provider_activated(message)
         else:
             # Generic alert for unknown events
             ch = self._get_channel("alerts")
@@ -591,6 +595,52 @@ class RSIBot(discord.Client):
             embed = discord.Embed(title="\U0001f4a1 Finding", description=message, color=COLOR_BLUE)
             embed.timestamp = datetime.now(timezone.utc)
             await thread.send(embed=embed)
+
+    async def _handle_provider_proposed(self, message: str) -> None:
+        """Post provider proposal to #approvals with signup instructions."""
+        ch = self._get_channel("approvals")
+        if not ch:
+            return
+        # Fetch full proposal details from bridge
+        providers = bridge_get("/providers")
+        proposed = (providers or {}).get("proposed", [])
+        # Find the most recent pending proposal
+        proposal = None
+        for p in reversed(proposed):
+            if p.get("status") == "pending_operator":
+                proposal = p
+                break
+
+        if proposal:
+            name = proposal.get("name", "?")
+            model_id = proposal.get("model_id", "?")
+            signup = proposal.get("signup_url", "")
+            free_tier = proposal.get("free_tier", "")
+
+            embed = discord.Embed(
+                title=f"\U0001f50c New Provider: {name}",
+                description=message,
+                color=COLOR_BLUE,
+            )
+            embed.add_field(name="Model", value=f"`{model_id}`", inline=True)
+            if free_tier:
+                embed.add_field(name="Free Tier", value=free_tier, inline=True)
+            if signup:
+                embed.add_field(name="Signup", value=signup, inline=False)
+            embed.set_footer(
+                text=f"Sign up, get API key, then run:\npython cli/providers.py add {name} --key YOUR_KEY"
+            )
+            embed.timestamp = datetime.now(timezone.utc)
+            await ch.send(embed=embed)
+        else:
+            embed = build_alert_embed("\U0001f50c Provider Proposed", message, COLOR_BLUE)
+            await ch.send(embed=embed)
+
+    async def _handle_provider_activated(self, message: str) -> None:
+        ch = self._get_channel("alerts")
+        if ch:
+            embed = build_alert_embed("\u2705 Provider Added", message, COLOR_GREEN)
+            await ch.send(embed=embed)
 
     # ── Reaction-based approvals ─────────────────────────────────────
 

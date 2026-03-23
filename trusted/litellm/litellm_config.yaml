@@ -15,6 +15,7 @@ model_list:
     litellm_params:
       model: "openrouter/openai/gpt-4.1-mini"
       api_key: "os.environ/OPENROUTER_API_KEY"
+  # --- DYNAMIC MODELS ---
 
 litellm_settings:
   callbacks: ["webhook"]

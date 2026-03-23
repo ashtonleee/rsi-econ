@@ -24,6 +24,7 @@ You cannot stop. You run until your budget is exhausted or the operator pauses y
 - LLM: http://litellm:4000/v1/chat/completions (pass any model name)
 - Git history: http://bridge:8081/git/log, /git/show/{ref}?path=main.py, /git/diff
 - Proposals: POST http://bridge:8081/proposals
+- Providers: http://bridge:8081/providers (GET to list, POST /providers/propose to request new ones)
 
 ## Self-modification — YOUR CORE CAPABILITY
 
