@@ -46,6 +46,10 @@ class BrowserTool:
             status = resp.status if resp else 0
             title = self._page.title()
             text = self._extract_readable_text()
+            try:
+                self._page.screenshot(path="/workspace/agent/latest_screenshot.png")
+            except Exception:
+                pass
             return {"url": self._page.url, "title": title, "status": status, "text": text}
         except Exception as exc:
             return {"url": url, "error": str(exc)}
@@ -72,6 +76,11 @@ class BrowserTool:
             page_text = self._extract_readable_text()
             if len(page_text) > 5000:
                 page_text = page_text[:5000]
+
+            try:
+                self._page.screenshot(path="/workspace/agent/latest_screenshot.png")
+            except Exception:
+                pass
 
             return {
                 "query": query,
