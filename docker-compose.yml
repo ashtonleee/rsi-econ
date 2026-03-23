@@ -78,6 +78,7 @@ services:
       - agent-workspace:/var/lib/rsi/workspace
       - ./sandbox/seed:/opt/seed:ro
       - ./sandbox/baseline:/opt/baseline:ro
+      - ./state/git-stats:/var/lib/rsi/git-stats
     ports:
       - "8081:8081"
     healthcheck:

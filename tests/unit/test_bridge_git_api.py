@@ -33,6 +33,11 @@ def load_git_manager_class(tmp_path: Path):
     # Read just the GitManager class and its dependencies
     source = WALLET_API_PATH.read_text(encoding="utf-8")
     # Create a minimal module with just GitManager
+    import json as _json
+    import re as _re
+    import logging as _logging
+    from datetime import datetime as _datetime, timezone as _timezone
+
     exec_globals: dict = {
         "__builtins__": __builtins__,
         "os": os,
@@ -40,6 +45,11 @@ def load_git_manager_class(tmp_path: Path):
         "subprocess": subprocess,
         "shutil": __import__("shutil"),
         "Any": __import__("typing").Any,
+        "json": _json,
+        "re": _re,
+        "datetime": _datetime,
+        "timezone": _timezone,
+        "LOGGER": _logging.getLogger("test_bridge_git"),
     }
     # Extract the GitManager class source
     lines = source.split("\n")
@@ -52,7 +62,7 @@ def load_git_manager_class(tmp_path: Path):
             if line and not line[0].isspace() and not line.startswith("class GitManager"):
                 break
             class_lines.append(line)
-    class_source = "\n".join(class_lines)
+    class_source = "from __future__ import annotations\n" + "\n".join(class_lines)
     exec(compile(class_source, str(WALLET_API_PATH), "exec"), exec_globals)
     return exec_globals["GitManager"]
 
