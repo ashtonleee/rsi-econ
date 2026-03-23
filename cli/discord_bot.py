@@ -244,17 +244,59 @@ def build_proposal_embed(data: dict) -> discord.Embed:
     return embed
 
 
-def build_evolution_embed(data: dict, message: str) -> discord.Embed:
-    embed = discord.Embed(title="\U0001f9ec Self-Edit", description=message, color=COLOR_GREEN)
+def _parse_diff(diff_text: str) -> dict:
+    """Parse a git diff to extract file names and line counts."""
+    files = []
+    added = 0
+    removed = 0
+    for line in diff_text.split("\n"):
+        if line.startswith("diff --git"):
+            # "diff --git a/foo.py b/foo.py" → "foo.py"
+            parts = line.split(" b/", 1)
+            if len(parts) == 2:
+                files.append(parts[1])
+        elif line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    return {"files": files, "added": added, "removed": removed}
+
+
+def build_evolution_embed(
+    data: dict, message: str, *, llm_summary: str = "", diff_text: str = "",
+) -> discord.Embed:
+    parsed = _parse_diff(diff_text) if diff_text else {"files": [], "added": 0, "removed": 0}
+    files = parsed["files"] or data.get("files_changed", "").split(", ") if data.get("files_changed") else parsed["files"]
+    file_list = ", ".join(f"`{f}`" for f in files) if files else "(unknown)"
+
+    title = f"\U0001f9ec Self-Edit: {', '.join(files)}" if files else "\U0001f9ec Self-Edit"
+    # Discord embed titles max 256 chars
+    if len(title) > 256:
+        title = title[:253] + "..."
+
+    embed = discord.Embed(title=title, color=COLOR_GREEN)
+
+    if llm_summary:
+        embed.description = llm_summary
+
     commit_hash = data.get("commit_hash", "")
-    files_changed = data.get("files_changed", "")
-    diff_summary = data.get("diff_summary", "")
     if commit_hash:
         embed.add_field(name="Commit", value=f"`{commit_hash[:8]}`", inline=True)
-    if files_changed:
-        embed.add_field(name="Files", value=files_changed, inline=True)
-    if diff_summary:
-        embed.add_field(name="Diff", value=f"```\n{diff_summary[:500]}\n```", inline=False)
+
+    embed.add_field(name="Files", value=file_list[:200], inline=True)
+    embed.add_field(
+        name="Lines",
+        value=f"+{parsed['added']} / -{parsed['removed']}",
+        inline=True,
+    )
+
+    # Collapsed raw diff at the bottom, truncated
+    if diff_text:
+        truncated = diff_text[:500]
+        if len(diff_text) > 500:
+            truncated += "\n... (truncated)"
+        embed.add_field(name="Raw Diff", value=f"```diff\n{truncated}\n```", inline=False)
+
     embed.timestamp = datetime.now(timezone.utc)
     return embed
 
@@ -370,6 +412,13 @@ class RSIBot(discord.Client):
                 pass
 
         # Create new thread
+        return await self._create_new_thread(channel_key, thread_key, name)
+
+    async def _create_new_thread(self, channel_key: str, thread_key: str, name: str) -> discord.Thread | None:
+        """Always create a fresh thread, replacing any cached thread ID."""
+        ch = self._get_channel(channel_key)
+        if not ch:
+            return None
         try:
             thread = await ch.create_thread(name=name, type=discord.ChannelType.public_thread)
             self.state.threads[thread_key] = thread.id
@@ -433,9 +482,9 @@ class RSIBot(discord.Client):
                 await ch.send(embed=embed)
 
     async def _handle_session_start(self, message: str, data: dict) -> None:
-        session_name = data.get("session_name", datetime.now().strftime("%Y-%m-%d_%H%M"))
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        session_name = data.get("session_name", ts)
         self.state.active_session = session_name
-        date_str = datetime.now().strftime("%Y-%m-%d")
 
         # Post to alerts
         ch = self._get_channel("alerts")
@@ -443,14 +492,31 @@ class RSIBot(discord.Client):
             embed = build_alert_embed("\U0001f7e2 Session Started", message, COLOR_GREEN)
             await ch.send(embed=embed)
 
-        # Create threads
-        await self._get_or_create_thread(
+        # Close old threads with a farewell message
+        for thread_key, channel_key in [("activity", "activity"), ("evolution", "evolution")]:
+            old_tid = self.state.threads.get(thread_key)
+            if old_tid:
+                old_ch = self._get_channel(channel_key)
+                if old_ch:
+                    try:
+                        old_thread = old_ch.get_thread(old_tid)
+                        if old_thread and not old_thread.archived:
+                            await old_thread.send("\U0001f6d1 Session ended. New session starting.")
+                            await old_thread.edit(archived=True)
+                    except Exception:
+                        pass
+
+        # Always create NEW threads (never reuse)
+        self.state.threads.pop("activity", None)
+        self.state.threads.pop("evolution", None)
+
+        await self._create_new_thread(
             "activity", "activity",
-            f"\U0001f9ea Session {session_name} ({date_str})",
+            f"\U0001f9ea Session {ts}",
         )
-        await self._get_or_create_thread(
+        await self._create_new_thread(
             "evolution", "evolution",
-            f"\U0001f9ec Evolution {session_name}",
+            f"\U0001f9ec Evolution {ts}",
         )
         self.state.save()
 
@@ -467,9 +533,28 @@ class RSIBot(discord.Client):
             "evolution", "evolution",
             f"\U0001f9ec Evolution {self.state.active_session or 'unknown'}",
         )
-        if thread:
-            embed = build_evolution_embed(data, message)
-            await thread.send(embed=embed)
+        if not thread:
+            return
+
+        # Fetch the actual diff from the bridge
+        diff_text = ""
+        diff_data = bridge_get("/git/diff")
+        if diff_data and diff_data.get("diff"):
+            diff_text = diff_data["diff"]
+
+        # Get LLM summary of the change
+        llm_summary = ""
+        if diff_text:
+            prompt = "Summarize this code change in one sentence. What was changed and why?"
+            result = bridge_post("/summarize", {
+                "text": f"{prompt}\n\n{diff_text[:3000]}",
+                "max_tokens": 80,
+            })
+            if result and result.get("summary"):
+                llm_summary = result["summary"]
+
+        embed = build_evolution_embed(data, message, llm_summary=llm_summary, diff_text=diff_text)
+        await thread.send(embed=embed)
 
     async def _handle_budget_alert(self, event_type: str, message: str) -> None:
         ch = self._get_channel("alerts")
@@ -600,6 +685,17 @@ class RSIBot(discord.Client):
             except Exception:
                 pass
 
+        # Fetch recent reasoning from bridge
+        reasoning_text = ""
+        reasoning_data = bridge_get("/agent/reasoning?lines=5")
+        if reasoning_data and reasoning_data.get("entries"):
+            entries = reasoning_data["entries"]
+            # Take last 2 for the embed field
+            recent = entries[-2:]
+            reasoning_text = "\n---\n".join(
+                e.get("content", "")[:150] for e in recent if e.get("content")
+            )
+
         # Build summary text
         text = f"Agent logs:\n{logs}\n\nDomains: {domain_stats}"
         result = bridge_post("/summarize", {"text": text, "max_tokens": 150})
@@ -608,6 +704,12 @@ class RSIBot(discord.Client):
         embed = build_summary_embed(summary, wallet)
         if domain_stats:
             embed.add_field(name="Domains", value=domain_stats, inline=False)
+        if reasoning_text:
+            embed.add_field(
+                name="\U0001f4ad Latest Thinking",
+                value=reasoning_text[:300],
+                inline=False,
+            )
         await thread.send(embed=embed)
 
     @summary_loop.before_loop

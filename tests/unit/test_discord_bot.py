@@ -161,3 +161,59 @@ def test_bridge_get_returns_none_on_failure(tmp_path: Path) -> None:
         result = mod.bridge_get("/wallet")
 
     assert result is None
+
+
+# ── Fix 1: Diff parsing ─────────────────────────────────────────────
+
+
+def test_parse_diff_extracts_files_and_counts() -> None:
+    mod = load_bot_module(Path("/tmp"))
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n"
+        "+++ b/main.py\n"
+        "@@ -10,3 +10,5 @@\n"
+        " unchanged line\n"
+        "-old line\n"
+        "-another old\n"
+        "+new line\n"
+        "+another new\n"
+        "+third new\n"
+        "diff --git a/browser_tool.py b/browser_tool.py\n"
+        "--- a/browser_tool.py\n"
+        "+++ b/browser_tool.py\n"
+        "+added line\n"
+    )
+    result = mod._parse_diff(diff)
+    assert result["files"] == ["main.py", "browser_tool.py"]
+    assert result["added"] == 4  # 3 from main.py + 1 from browser_tool.py
+    assert result["removed"] == 2
+
+
+def test_evolution_embed_with_diff_and_summary() -> None:
+    mod = load_bot_module(Path("/tmp"))
+    data = {"commit_hash": "abc123"}
+    diff = "diff --git a/main.py b/main.py\n+new code\n-old code\n"
+    embed = mod.build_evolution_embed(
+        data, "edit",
+        llm_summary="Added error handling to the chat function.",
+        diff_text=diff,
+    )
+    assert "main.py" in embed.title
+    assert embed.description == "Added error handling to the chat function."
+    field_names = [f.name for f in embed.fields]
+    assert "Lines" in field_names
+    assert "Raw Diff" in field_names
+    # Check the lines field
+    lines_field = next(f for f in embed.fields if f.name == "Lines")
+    assert "+1" in lines_field.value
+    assert "-1" in lines_field.value
+
+
+def test_evolution_embed_truncates_long_diff() -> None:
+    mod = load_bot_module(Path("/tmp"))
+    long_diff = "diff --git a/main.py b/main.py\n" + "+x\n" * 1000
+    embed = mod.build_evolution_embed({}, "edit", diff_text=long_diff)
+    raw_field = next(f for f in embed.fields if f.name == "Raw Diff")
+    assert "truncated" in raw_field.value
+    assert len(raw_field.value) < 600  # 500 chars + code block markers
