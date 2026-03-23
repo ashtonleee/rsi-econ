@@ -39,6 +39,10 @@ MAX_CONTEXT_MESSAGES = 40
 # Browser tool singleton (lazy-initialized)
 _browser_tool = None
 
+# State tracking for error handling and empty responses
+_consecutive_errors = 0
+_empty_response_count = 0
+
 
 def get_browser():
     """Get or create the singleton BrowserTool instance."""
@@ -587,7 +591,7 @@ def load_recent_history() -> list[dict]:
 
 
 def main() -> int:
-    global _browser_tool
+    global _browser_tool, _consecutive_errors, _empty_response_count
 
     knowledge = load_knowledge()
     knowledge["restarts"] = knowledge.get("restarts", 0) + 1
@@ -689,15 +693,34 @@ def main() -> int:
                     continue
                 else:
                     # Budget exhausted — try free providers before exiting
-                    print(f"{prefix} 429 — budget exhausted, trying free providers...", flush=True)
-                    free_response = try_free_provider_chat(messages, tools=TOOLS)
-                    if free_response:
-                        response = free_response
+                    # Exponential backoff on the paid endpoint first
+                    for backoff in [1, 2, 4]:
+                        print(f"{prefix} budget exhausted, retrying paid endpoint in {backoff}s...", flush=True)
+                        time.sleep(backoff)
+                        try:
+                            response = chat(messages, tools=TOOLS)
+                            # If we got a response, process it normally
+                            break
+                        except urllib_error.HTTPError as exc2:
+                            if exc2.code == 429:
+                                # Still exhausted, try next backoff or free providers
+                                print(f"{prefix} still rate limited after {backoff}s backoff", flush=True)
+                                continue
+                            else:
+                                raise
                     else:
-                        print(f"{prefix} no free providers available, exiting", flush=True)
-                        break
-            consecutive_errors = getattr(main, '_consecutive_errors', 0) + 1
-            main._consecutive_errors = consecutive_errors
+                        # All backoffs exhausted — try free providers
+                        print(f"{prefix} paid endpoint exhausted, trying free providers...", flush=True)
+                        free_response = try_free_provider_chat(messages, tools=TOOLS)
+                        if free_response:
+                            response = free_response
+                            # Don't continue — fall through to process the free response
+                            # so we actually use its tool calls/content
+                        else:
+                            print(f"{prefix} no free providers available, exiting", flush=True)
+                            break
+            consecutive_errors = _consecutive_errors + 1
+            _consecutive_errors = consecutive_errors
             print(f"{prefix} API error #{consecutive_errors}: {exc}", flush=True)
             if consecutive_errors >= 3:
                 print(f"{prefix} 3 consecutive errors — resetting conversation", flush=True)
@@ -705,11 +728,12 @@ def main() -> int:
                     messages[0],
                     {"role": "user", "content": "Previous conversation was reset due to errors. Continue working toward your objective."},
                 ]
-                main._consecutive_errors = 0
+                _consecutive_errors = 0
             time.sleep(5)
             continue
 
-        main._consecutive_errors = 0  # reset on success
+        _consecutive_errors = 0  # reset on success
+        _empty_response_count = 0  # reset on success
         choice = response.get("choices", [{}])[0]
         raw_msg = choice.get("message", {})
         # Clean message: only keep role, content, tool_calls — strip provider-specific fields
@@ -725,7 +749,7 @@ def main() -> int:
 
         # Reset empty-response counter on any real response
         if msg.get("tool_calls") or msg.get("content"):
-            main._empty_count = 0
+            _empty_response_count = 0
 
         # Handle tool calls
         tool_calls = msg.get("tool_calls")
@@ -767,8 +791,8 @@ def main() -> int:
             print(f"{prefix} thinking (turn {turn})", flush=True)
         else:
             # No content and no tool calls — nudge the model to continue
-            empty_count = getattr(main, '_empty_count', 0) + 1
-            main._empty_count = empty_count
+            _empty_response_count += 1
+            empty_count = _empty_response_count
             if empty_count >= 3:
                 print(f"{prefix} 3 consecutive empty responses, exiting", flush=True)
                 break

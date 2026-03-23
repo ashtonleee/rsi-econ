@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -9,6 +10,9 @@ import tarfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 
 WORKSPACE = Path(os.getenv("RSI_AGENT_WORKSPACE", "/workspace/agent"))
@@ -17,6 +21,7 @@ RESTART_PATH = WORKSPACE / ".restart_requested"
 PAUSED_PATH = WORKSPACE / ".paused"
 RESUME_PATH = WORKSPACE / ".resume"
 PUSH_REQUESTED_PATH = WORKSPACE / ".push_requested"
+BRIDGE_URL = os.getenv("WALLET_URL", "http://bridge:8081")
 CRASH_WINDOW_SECONDS = int(os.getenv("RSI_CRASH_WINDOW_SECONDS", "30"))
 RESUME_POLL_SECONDS = int(os.getenv("RSI_RESUME_POLL_SECONDS", "5"))
 RESTART_STOP_TIMEOUT_SECONDS = int(os.getenv("RSI_RESTART_STOP_TIMEOUT_SECONDS", "10"))
@@ -52,25 +57,29 @@ def write_event(event_type: str, message: str, data: dict | None = None) -> None
         pass  # never crash supervisor for notifications
 
 
-def run_git(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(WORKSPACE),
-        capture_output=True,
-        text=True,
-        check=False,
+# --- Bridge HTTP communication (replaces direct git calls) ---
+
+def _bridge_request(method: str, path: str, payload: dict | None = None) -> dict[str, Any] | None:
+    """Make an HTTP request to the bridge API. Returns parsed JSON or None on error."""
+    url = f"{BRIDGE_URL}{path}"
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"} if data else {},
+        method=method,
     )
+    try:
+        with urllib_request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        log("BRIDGE_ERROR", f"{method} {path} failed: {exc}")
+        return None
 
 
-def run_git_checked(event: str, message: str, *args: str) -> bool:
-    result = run_git(*args)
-    if result.returncode == 0:
-        return True
-    details = result.stderr.strip() or result.stdout.strip() or "unknown git error"
-    log(event, f"{message}: {details}")
-    PAUSED_PATH.write_text("git failure\n", encoding="utf-8")
-    return False
-
+# --- Syntax validation (runs locally, no git needed) ---
 
 def validate_agent_code() -> bool:
     """Syntax-check main.py before allowing restart with new code."""
@@ -89,6 +98,8 @@ def validate_agent_code() -> bool:
     return True
 
 
+# --- Backup (runs locally on workspace files, no git needed) ---
+
 def backup_workspace() -> None:
     """Create a tarball snapshot of the workspace before self-edit commits."""
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -101,7 +112,6 @@ def backup_workspace() -> None:
     except Exception as exc:
         log("BACKUP_FAILED", f"could not create backup: {exc}")
         return
-    # Rotate: keep only the newest MAX_BACKUPS
     backups = sorted(BACKUP_DIR.glob("workspace-*.tar.gz"))
     while len(backups) > MAX_BACKUPS:
         oldest = backups.pop(0)
@@ -111,20 +121,7 @@ def backup_workspace() -> None:
             pass
 
 
-def check_git_integrity() -> bool:
-    """Run git fsck to verify repo integrity after a commit."""
-    result = run_git("fsck", "--no-dangling")
-    if result.returncode == 0:
-        return True
-    log("GIT_FSCK", f"integrity check failed: {result.stderr.strip()[:200]}")
-    run_git("gc", "--auto")
-    result = run_git("fsck", "--no-dangling")
-    if result.returncode == 0:
-        log("GIT_FSCK", "integrity restored after gc")
-        return True
-    log("GIT_FSCK", "integrity check still failing after gc")
-    return False
-
+# --- Restore (file operations local, git commit via bridge) ---
 
 def restore_from_backup() -> bool:
     """Restore workspace from the latest tarball backup."""
@@ -135,8 +132,6 @@ def restore_from_backup() -> bool:
     latest = backups[-1]
     try:
         for item in WORKSPACE.iterdir():
-            if item.name == ".git":
-                continue
             if item.is_dir():
                 shutil.rmtree(item)
             else:
@@ -145,11 +140,10 @@ def restore_from_backup() -> bool:
             for member in tar.getmembers():
                 if member.name.startswith("workspace/"):
                     member.name = member.name[len("workspace/"):]
-                    if member.name and member.name != ".git" and not member.name.startswith(".git/"):
+                    if member.name:
                         tar.extract(member, str(WORKSPACE))
         log("RESTORE", f"restored from {latest.name}")
-        run_git("add", "-A")
-        run_git("commit", "-m", "restored from backup")
+        _bridge_request("POST", "/git/commit", {"message": "restored from backup"})
         return True
     except Exception as exc:
         log("RESTORE_FAILED", f"could not restore from backup: {exc}")
@@ -165,8 +159,7 @@ def restore_from_baseline() -> bool:
         for item in BASELINE_DIR.iterdir():
             if item.is_file():
                 shutil.copy2(str(item), str(WORKSPACE / item.name))
-        run_git("add", "-A")
-        run_git("commit", "-m", "restored from baseline (nuclear)")
+        _bridge_request("POST", "/git/commit", {"message": "restored from baseline (nuclear)"})
         log("RESTORE", "restored from baseline")
         return True
     except Exception as exc:
@@ -174,67 +167,81 @@ def restore_from_baseline() -> bool:
         return False
 
 
+# --- Git operations via bridge API ---
+
 def ensure_repo() -> bool:
-    if (WORKSPACE / ".git").exists():
-        return True
-    log("INIT", "initializing git repo for seed workspace")
-    if not run_git_checked("PAUSED", "git init failed", "init"):
+    """Initialize the git repo via bridge API."""
+    resp = _bridge_request("POST", "/git/init")
+    if resp is None:
+        log("PAUSED", "bridge git init failed")
+        PAUSED_PATH.write_text("bridge git init failed\n", encoding="utf-8")
         return False
-    if not run_git_checked("PAUSED", "git add failed during seed init", "add", "-A"):
-        return False
-    if not run_git_checked("PAUSED", "git commit failed during seed init", "commit", "-m", "seed"):
-        return False
-    log("INIT", 'created initial "seed" commit')
+    log("INIT", f"repo ready: {resp.get('status', '?')} hash={resp.get('hash', '?')[:8]}")
     return True
 
 
 def commit_restart() -> bool | None:
+    """Commit self-edit via bridge, validate, check integrity."""
     if RESTART_PATH.exists():
         RESTART_PATH.unlink()
-    # Backup workspace state BEFORE git operations
     backup_workspace()
-    if not run_git_checked("PAUSED", "git add failed during self-edit commit", "add", "-A"):
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    resp = _bridge_request("POST", "/git/commit", {"message": f"self-edit {timestamp}"})
+    if resp is None:
+        log("PAUSED", "bridge commit failed")
+        PAUSED_PATH.write_text("bridge commit failed\n", encoding="utf-8")
         return None
-    status = run_git("status", "--porcelain")
-    if status.returncode != 0:
-        details = status.stderr.strip() or status.stdout.strip() or "unknown git error"
-        log("PAUSED", f"git status failed during self-edit commit: {details}")
-        PAUSED_PATH.write_text("git failure\n", encoding="utf-8")
-        return None
-    if not status.stdout.strip():
+
+    if not resp.get("changed", False):
         log("RESTART", "restart requested with no tracked changes; restarting current code")
         return False
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if not run_git_checked(
-        "PAUSED",
-        "git commit failed during self-edit commit",
-        "commit",
-        "-m",
-        f"self-edit {timestamp}",
-    ):
-        return None
-    # Signal host to push (host watches for this flag on bind-mounted workspace)
+
+    # Signal host to push
     try:
         PUSH_REQUESTED_PATH.write_text(timestamp + "\n", encoding="utf-8")
     except OSError:
         pass
+
     # Validate syntax before restarting with new code
     if not validate_agent_code():
-        revert_last_commit()
+        _bridge_request("POST", "/git/revert/HEAD~1")
         log("VALIDATION_REVERTED", "reverted self-edit due to syntax error")
         return False
-    # Verify git integrity after commit
-    if not check_git_integrity():
+
+    # Verify git integrity
+    fsck = _bridge_request("GET", "/git/fsck")
+    if fsck and not fsck.get("ok", True):
         log("GIT_CORRUPT", "git integrity check failed, attempting restore")
         if not restore_from_backup():
             restore_from_baseline()
         return False
+
     return True
 
 
 def revert_last_commit() -> bool:
-    return run_git_checked("PAUSED", "git revert failed after rapid crash", "revert", "HEAD", "--no-edit")
+    """Revert to previous commit via bridge API."""
+    resp = _bridge_request("POST", "/git/revert/HEAD~1")
+    if resp is None or "error" in (resp or {}):
+        log("PAUSED", "bridge revert failed")
+        PAUSED_PATH.write_text("bridge revert failed\n", encoding="utf-8")
+        return False
+    return True
 
+
+def try_git_push() -> None:
+    """Push current branch via bridge API."""
+    resp = _bridge_request("POST", "/git/push")
+    if resp and resp.get("status") == "pushed":
+        log("GIT_PUSH", "pushed to origin via bridge")
+    elif resp and resp.get("status") == "no_remote":
+        pass  # no remote configured, silent
+    elif resp:
+        log("GIT_PUSH", f"push result: {resp.get('status', '?')}")
+
+
+# --- Process management (unchanged) ---
 
 def stop_agent_for_restart(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
@@ -281,18 +288,7 @@ def handle_signal(signum: int, _frame: object) -> None:
         CURRENT_PROCESS.send_signal(signum)
 
 
-def try_git_push() -> None:
-    """Push current branch to origin if a remote is configured."""
-    result = run_git("remote", "get-url", "origin")
-    if result.returncode != 0:
-        return  # no remote configured
-    push = run_git("push", "origin", "HEAD")
-    if push.returncode == 0:
-        log("GIT_PUSH", "pushed to origin")
-    else:
-        detail = push.stderr.strip() or push.stdout.strip() or "unknown"
-        log("GIT_PUSH", f"push failed (non-blocking): {detail}")
-
+# --- Main agent loop ---
 
 def launch_agent(after_edit: bool = False) -> int:
     global CURRENT_PROCESS
@@ -324,8 +320,10 @@ def launch_agent(after_edit: bool = False) -> int:
             crash_counter = 0
             current_after_edit = bool(commit_result)
             if commit_result:
-                diff_stat = run_git("diff", "--stat", "HEAD~1").stdout.strip()
-                write_event("self_edit", f"Self-edited: {diff_stat[:200] or 'unknown changes'}")
+                # Get diff stat from bridge for notification
+                diff_resp = _bridge_request("GET", "/git/diff?ref1=HEAD~1&ref2=HEAD")
+                diff_stat = (diff_resp or {}).get("diff", "")[:200] or "unknown changes"
+                write_event("self_edit", f"Self-edited: {diff_stat}")
             log("RESTART", "agent self-edited, restarting with new code")
             continue
 

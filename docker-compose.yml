@@ -63,6 +63,9 @@ services:
     environment:
       PROPOSALS_DIR: /var/lib/rsi/proposals
       RSI_BUDGET_USD: ${RSI_BUDGET_USD:-5.00}
+      GIT_REPO_DIR: /var/lib/rsi/git-repo
+      GIT_WORKSPACE_DIR: /var/lib/rsi/workspace
+      SEED_DIR: /opt/seed
     volumes:
       - ./state/proposals:/var/lib/rsi/proposals
       - ./state/logs:/var/log/rsi
@@ -70,6 +73,10 @@ services:
       - ./state/events:/var/lib/rsi/events
       - ./state/operator_messages:/var/lib/rsi/operator_messages
       - ./state/notification_config.json:/var/lib/rsi/notification_config.json:ro
+      - git-repo:/var/lib/rsi/git-repo
+      - agent-workspace:/var/lib/rsi/workspace
+      - ./sandbox/seed:/opt/seed:ro
+      - ./sandbox/baseline:/opt/baseline:ro
     ports:
       - "8081:8081"
     healthcheck:
@@ -104,9 +111,8 @@ services:
       WALLET_URL: http://bridge:8081
       RSI_MODEL: ${RSI_MODEL:-default}
       RSI_MAX_TURNS: ${RSI_MAX_TURNS:-0}
-      GIT_REMOTE_URL: ${GIT_REMOTE_URL:-}  # Set in .env to enable session persistence to GitHub
     volumes:
-      - ./sandbox/seed:/workspace/agent
+      - agent-workspace:/workspace/agent
       - ./sandbox/supervisor.py:/opt/supervisor/supervisor.py:ro
       - ./sandbox/baseline:/opt/baseline:ro
       - ./state/backups:/var/lib/rsi/backups
@@ -128,3 +134,5 @@ networks:
 volumes:
   proxy-ca: {}
   proxy-ca-cert: {}
+  git-repo: {}
+  agent-workspace: {}

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -34,11 +36,12 @@ _event_poller_stop = threading.Event()
 
 def _event_poller() -> None:
     """Background thread that drains supervisor event files and sends notifications."""
+    print("[bridge] event poller thread started", flush=True)
     while not _event_poller_stop.is_set():
         try:
             process_event_files()
-        except Exception:
-            pass  # never crash the bridge for notification failures
+        except Exception as exc:
+            print(f"[bridge] event poller error: {exc}", flush=True)
         _event_poller_stop.wait(EVENT_POLL_INTERVAL)
 
 
@@ -275,6 +278,113 @@ def _load_proposal_or_404(proposals_dir: Path, proposal_id: str) -> tuple[Path, 
     return path, _read_json(path)
 
 
+class GitManager:
+    """Manages the trusted git repository for the agent workspace."""
+
+    def __init__(
+        self,
+        repo_dir: Path,
+        workspace_dir: Path,
+        seed_dir: Path,
+    ) -> None:
+        self.repo_dir = repo_dir
+        self.workspace_dir = workspace_dir
+        self.seed_dir = seed_dir
+
+    def _run_git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "GIT_DIR": str(self.repo_dir / ".git"), "GIT_WORK_TREE": str(self.workspace_dir)}
+        return subprocess.run(
+            ["git", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    def is_initialized(self) -> bool:
+        return (self.repo_dir / ".git").exists()
+
+    def init_repo(self) -> dict[str, Any]:
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        if self.is_initialized():
+            head = self._run_git("rev-parse", "HEAD")
+            return {"status": "already_initialized", "hash": head.stdout.strip()}
+        # Copy seed files into workspace
+        if self.seed_dir.exists():
+            for item in self.seed_dir.iterdir():
+                if item.is_file() and item.name != ".git":
+                    shutil.copy2(str(item), str(self.workspace_dir / item.name))
+        # Init repo with GIT_DIR pointing to repo_dir
+        subprocess.run(["git", "init", str(self.repo_dir)], capture_output=True, check=False)
+        self._run_git("add", "-A")
+        self._run_git("commit", "-m", "seed")
+        head = self._run_git("rev-parse", "HEAD")
+        return {"status": "initialized", "hash": head.stdout.strip()}
+
+    def commit(self, message: str) -> dict[str, Any]:
+        self._run_git("add", "-A")
+        status = self._run_git("status", "--porcelain")
+        if not status.stdout.strip():
+            return {"changed": False, "hash": self._run_git("rev-parse", "HEAD").stdout.strip()}
+        self._run_git("commit", "-m", message)
+        head = self._run_git("rev-parse", "HEAD")
+        return {"changed": True, "hash": head.stdout.strip()}
+
+    def revert(self, ref: str) -> dict[str, Any]:
+        result = self._run_git("checkout", ref, "--", ".")
+        if result.returncode != 0:
+            return {"error": result.stderr.strip() or "revert failed"}
+        self._run_git("add", "-A")
+        self._run_git("commit", "-m", f"reverted to {ref}")
+        head = self._run_git("rev-parse", "HEAD")
+        return {"hash": head.stdout.strip(), "ref": ref}
+
+    def log(self, count: int = 20) -> list[dict[str, str]]:
+        result = self._run_git("log", f"-{count}", "--format=%H|%s|%aI")
+        if result.returncode != 0:
+            return []
+        entries = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split("|", 2)
+            if len(parts) == 3:
+                entries.append({"hash": parts[0], "message": parts[1], "date": parts[2]})
+        return entries
+
+    def show(self, ref: str, path: str) -> str | None:
+        result = self._run_git("show", f"{ref}:{path}")
+        if result.returncode != 0:
+            return None
+        return result.stdout
+
+    def diff(self, ref1: str, ref2: str) -> str:
+        result = self._run_git("diff", ref1, ref2)
+        return result.stdout
+
+    def diff_stat(self, ref: str = "HEAD~1") -> str:
+        result = self._run_git("diff", "--stat", ref)
+        return result.stdout.strip()
+
+    def fsck(self) -> bool:
+        result = self._run_git("fsck", "--no-dangling")
+        if result.returncode == 0:
+            return True
+        self._run_git("gc", "--auto")
+        return self._run_git("fsck", "--no-dangling").returncode == 0
+
+    def push(self) -> dict[str, Any]:
+        result = self._run_git("remote", "get-url", "origin")
+        if result.returncode != 0:
+            return {"status": "no_remote"}
+        push = self._run_git("push", "origin", "HEAD")
+        if push.returncode == 0:
+            return {"status": "pushed"}
+        return {"status": "push_failed", "error": push.stderr.strip()[:200]}
+
+
 def create_app(
     proposals_dir: str | os.PathLike[str] | None = None,
     *,
@@ -308,6 +418,11 @@ def create_app(
         litellm_base_url=litellm_base_url or default_litellm_base_url,
     )
 
+    app.state.git_manager = GitManager(
+        repo_dir=Path(os.getenv("GIT_REPO_DIR", "/var/lib/rsi/git-repo")),
+        workspace_dir=Path(os.getenv("GIT_WORKSPACE_DIR", "/var/lib/rsi/workspace")),
+        seed_dir=Path(os.getenv("SEED_DIR", "/opt/seed")),
+    )
     app.state.operator_messages_dir = Path(os.getenv("OPERATOR_MESSAGES_DIR", "/var/lib/rsi/operator_messages"))
     app.state.operator_messages_dir.mkdir(parents=True, exist_ok=True)
     app.state._budget_warned_25 = False
@@ -418,6 +533,49 @@ def create_app(
             f.write(json.dumps(entry) + "\n")
         notify("operator_injection", f"Operator: {message[:100]}")
         return {"status": "queued"}
+
+    # --- Git API endpoints (trusted git repo management) ---
+
+    @app.post("/git/init")
+    def git_init() -> dict[str, Any]:
+        return app.state.git_manager.init_repo()
+
+    @app.post("/git/commit")
+    def git_commit(payload: dict[str, Any]) -> dict[str, Any]:
+        message = str(payload.get("message", "")).strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+        return app.state.git_manager.commit(message)
+
+    @app.post("/git/revert/{ref:path}")
+    def git_revert(ref: str) -> dict[str, Any]:
+        result = app.state.git_manager.revert(ref)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+
+    @app.get("/git/log")
+    def git_log(count: int = 20) -> list[dict[str, str]]:
+        return app.state.git_manager.log(count)
+
+    @app.get("/git/show/{ref:path}")
+    def git_show(ref: str, path: str = "main.py") -> dict[str, Any]:
+        content = app.state.git_manager.show(ref, path)
+        if content is None:
+            raise HTTPException(status_code=404, detail=f"{path} not found at {ref}")
+        return {"ref": ref, "path": path, "content": content}
+
+    @app.get("/git/diff")
+    def git_diff(ref1: str = "HEAD~1", ref2: str = "HEAD") -> dict[str, str]:
+        return {"ref1": ref1, "ref2": ref2, "diff": app.state.git_manager.diff(ref1, ref2)}
+
+    @app.get("/git/fsck")
+    def git_fsck() -> dict[str, bool]:
+        return {"ok": app.state.git_manager.fsck()}
+
+    @app.post("/git/push")
+    def git_push() -> dict[str, Any]:
+        return app.state.git_manager.push()
 
     return app
 

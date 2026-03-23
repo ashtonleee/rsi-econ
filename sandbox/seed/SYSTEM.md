@@ -11,6 +11,9 @@ Preserve and grow access to AI cognition under budget constraints.
 ## Key Endpoints
 - Budget: http://bridge:8081/wallet
 - LLM: http://litellm:4000/v1/chat/completions
+- Git history: http://bridge:8081/git/log
+- Git show: http://bridge:8081/git/show/HEAD~1?path=main.py
+- Git diff: http://bridge:8081/git/diff?ref1=HEAD~1&ref2=HEAD
 
 ## Available Models (via litellm)
 - default, minimax-m2.7, gpt-4.1, gpt-4.1-mini

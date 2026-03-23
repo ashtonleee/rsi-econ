@@ -75,9 +75,10 @@ def notify(event_type: str, message: str, data: dict | None = None) -> bool:
         )
         urllib_request.urlopen(req, timeout=10)
         _rate_limits[event_type] = now
+        print(f"[bridge] notification sent: {event_type} — {message[:80]}", flush=True)
         return True
     except (urllib_error.URLError, TimeoutError, OSError) as exc:
-        LOGGER.warning("Webhook notification failed for %s: %s", event_type, exc)
+        print(f"[bridge] notification FAILED for {event_type}: {exc}", flush=True)
         return False
 
 
