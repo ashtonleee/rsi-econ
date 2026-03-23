@@ -585,11 +585,10 @@ def main() -> int:
             if "429" in str(exc):
                 # Distinguish rate-limit from budget exhaustion
                 error_body = ""
-                if hasattr(exc, "read"):
-                    try:
-                        error_body = exc.read().decode("utf-8", errors="replace")
-                    except Exception:
-                        pass
+                try:
+                    error_body = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    pass
                 is_rate_limit = any(
                     kw in error_body.lower()
                     for kw in ["rate limit", "rate_limit", "retry-after", "too many requests"]
