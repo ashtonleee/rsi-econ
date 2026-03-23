@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -287,10 +288,14 @@ class GitManager:
         repo_dir: Path,
         workspace_dir: Path,
         seed_dir: Path,
+        stats_dir: Path | None = None,
     ) -> None:
         self.repo_dir = repo_dir
         self.workspace_dir = workspace_dir
         self.seed_dir = seed_dir
+        self.stats_dir = stats_dir
+        if self.stats_dir:
+            self.stats_dir.mkdir(parents=True, exist_ok=True)
 
     def _run_git(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "GIT_DIR": str(self.repo_dir / ".git"), "GIT_WORK_TREE": str(self.workspace_dir)}
@@ -324,23 +329,46 @@ class GitManager:
         head = self._run_git("rev-parse", "HEAD")
         return {"status": "initialized", "hash": head.stdout.strip()}
 
-    def commit(self, message: str) -> dict[str, Any]:
+    # --- Core git operations ---
+
+    def commit(
+        self,
+        message: str,
+        wallet_state: dict[str, Any] | None = None,
+        source: str = "agent_edit",
+    ) -> dict[str, Any]:
         self._run_git("add", "-A")
         status = self._run_git("status", "--porcelain")
         if not status.stdout.strip():
             return {"changed": False, "hash": self._run_git("rev-parse", "HEAD").stdout.strip()}
         self._run_git("commit", "-m", message)
         head = self._run_git("rev-parse", "HEAD")
-        return {"changed": True, "hash": head.stdout.strip()}
+        commit_hash = head.stdout.strip()
+        try:
+            self._write_commit_stats(commit_hash, message, wallet_state, source)
+            self._increment_branch_commit_count()
+        except Exception as exc:
+            LOGGER.warning("Failed to write commit stats for %s: %s", commit_hash[:7], exc)
+        return {"changed": True, "hash": commit_hash}
 
-    def revert(self, ref: str) -> dict[str, Any]:
+    def revert(
+        self,
+        ref: str,
+        wallet_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         result = self._run_git("checkout", ref, "--", ".")
         if result.returncode != 0:
             return {"error": result.stderr.strip() or "revert failed"}
         self._run_git("add", "-A")
-        self._run_git("commit", "-m", f"reverted to {ref}")
+        msg = f"reverted to {ref}"
+        self._run_git("commit", "-m", msg)
         head = self._run_git("rev-parse", "HEAD")
-        return {"hash": head.stdout.strip(), "ref": ref}
+        commit_hash = head.stdout.strip()
+        try:
+            self._write_commit_stats(commit_hash, msg, wallet_state, "supervisor_revert")
+        except Exception as exc:
+            LOGGER.warning("Failed to write revert stats for %s: %s", commit_hash[:7], exc)
+        return {"hash": commit_hash, "ref": ref}
 
     def log(self, count: int = 20) -> list[dict[str, str]]:
         result = self._run_git("log", f"-{count}", "--format=%H|%s|%aI")
@@ -385,6 +413,307 @@ class GitManager:
             return {"status": "pushed"}
         return {"status": "push_failed", "error": push.stderr.strip()[:200]}
 
+    # --- Branch / checkout / merge ---
+
+    def current_branch(self) -> str | None:
+        result = self._run_git("branch", "--show-current")
+        branch = result.stdout.strip()
+        return branch if branch else None
+
+    def _session_root(self) -> str | None:
+        """Return the session/{name} root of the current branch, or None.
+
+        Handles both session branches (session/foo) and experiment branches
+        (session/foo--exp/bar) by splitting on '--exp/' first.
+        """
+        branch = self.current_branch()
+        if not branch:
+            return None
+        # If on an experiment branch, extract the session root before --exp/
+        if "--exp/" in branch:
+            session_part = branch.split("--exp/")[0]
+            parts = session_part.split("/")
+            if len(parts) >= 2 and parts[0] == "session":
+                return session_part
+            return None
+        parts = branch.split("/")
+        if len(parts) >= 2 and parts[0] == "session":
+            return f"{parts[0]}/{parts[1]}"
+        return None
+
+    def _validate_branch_namespace(self, target: str) -> str | None:
+        """Return error message if target is outside current session namespace, or None if valid."""
+        root = self._session_root()
+        if root is None:
+            return "not on a session branch"
+        # Allow the session root itself, or experiment branches (root--exp/...)
+        if target != root and not target.startswith(f"{root}--exp/"):
+            return f"branch '{target}' is outside session namespace '{root}'"
+        return None
+
+    def create_branch(self, name: str) -> dict[str, Any]:
+        root = self._session_root()
+        if root is None:
+            return {"error": "not on a session branch"}
+        # Experiment branches use -- separator to avoid git ref path conflict:
+        # session/foo (branch file) can coexist with session/foo--exp/bar (different prefix)
+        if not name.startswith(f"{root}--exp/"):
+            return {"error": f"branch name must start with '{root}--exp/'"}
+        suffix = name[len(f"{root}--exp/"):]
+        if not suffix or not re.match(r"^[a-zA-Z0-9_-]+$", suffix):
+            return {"error": "experiment name must be non-empty and contain only [a-zA-Z0-9_-]"}
+        result = self._run_git("checkout", "-b", name)
+        if result.returncode != 0:
+            return {"error": result.stderr.strip() or "branch creation failed"}
+        try:
+            parent_hash = self._run_git("rev-parse", "HEAD").stdout.strip()
+            self._write_branch_metadata(name, root, parent_hash, "active")
+        except Exception as exc:
+            LOGGER.warning("Failed to write branch metadata for %s: %s", name, exc)
+        return {"branch": name, "status": "created"}
+
+    def checkout(self, ref: str) -> dict[str, Any]:
+        err = self._validate_branch_namespace(ref)
+        if err:
+            return {"error": err}
+        verify = self._run_git("rev-parse", "--verify", ref)
+        if verify.returncode != 0:
+            return {"error": f"ref '{ref}' does not exist"}
+        # Commit any pending changes before switching (stats files, etc.)
+        self._run_git("add", "-A")
+        status = self._run_git("status", "--porcelain")
+        if status.stdout.strip():
+            self._run_git("commit", "-m", f"auto-commit before checkout to {ref}")
+        result = self._run_git("checkout", ref)
+        if result.returncode != 0:
+            return {"error": result.stderr.strip() or "checkout failed"}
+        # Write restart marker so supervisor restarts the agent with new code
+        restart_marker = self.workspace_dir / ".restart_requested"
+        restart_marker.write_text("checkout", encoding="utf-8")
+        return {"branch": ref, "status": "checked_out", "restart": True}
+
+    def merge(self, branch: str) -> dict[str, Any]:
+        err = self._validate_branch_namespace(branch)
+        if err:
+            return {"error": err}
+        verify = self._run_git("rev-parse", "--verify", branch)
+        if verify.returncode != 0:
+            return {"error": f"branch '{branch}' does not exist"}
+        result = self._run_git("merge", branch, "--no-edit")
+        if result.returncode != 0:
+            # Check for merge conflict
+            if "CONFLICT" in result.stdout or "Automatic merge failed" in result.stdout:
+                self._run_git("merge", "--abort")
+                return {"status": "conflict", "message": result.stdout.strip()[:500]}
+            return {"error": result.stderr.strip() or "merge failed"}
+        head = self._run_git("rev-parse", "HEAD")
+        commit_hash = head.stdout.strip()
+        try:
+            self._update_branch_metadata(branch, "merged")
+        except Exception as exc:
+            LOGGER.warning("Failed to update branch metadata for %s: %s", branch, exc)
+        return {"status": "merged", "hash": commit_hash}
+
+    def list_branches(self) -> dict[str, Any]:
+        result = self._run_git("branch", "--format=%(refname:short)")
+        branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
+        return {"current": self.current_branch(), "branches": branches}
+
+    def delete_branch(self, name: str) -> dict[str, Any]:
+        current = self.current_branch()
+        if name == current:
+            return {"error": "cannot delete the current branch"}
+        root = self._session_root()
+        if root and name == root:
+            return {"error": "cannot delete the session root branch"}
+        result = self._run_git("branch", "-D", name)
+        if result.returncode != 0:
+            return {"error": result.stderr.strip() or "delete failed"}
+        try:
+            self._update_branch_metadata(name, "abandoned")
+        except Exception as exc:
+            LOGGER.warning("Failed to update branch metadata for %s: %s", name, exc)
+        return {"branch": name, "status": "deleted"}
+
+    # --- Tags ---
+
+    def tag(self, name: str, ref: str = "HEAD") -> dict[str, Any]:
+        resolved = self._run_git("rev-parse", ref)
+        if resolved.returncode != 0:
+            return {"error": f"ref '{ref}' does not exist"}
+        result = self._run_git("tag", name, ref)
+        if result.returncode != 0:
+            return {"error": result.stderr.strip() or "tag creation failed"}
+        return {"tag": name, "ref": resolved.stdout.strip()}
+
+    def list_tags(self) -> list[dict[str, str]]:
+        result = self._run_git("tag", "-l", "--sort=-creatordate",
+                               "--format=%(refname:short)|%(objectname:short)")
+        if result.returncode != 0:
+            return []
+        tags = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split("|", 1)
+            if len(parts) == 2:
+                tags.append({"name": parts[0], "hash": parts[1]})
+        return tags
+
+    # --- Per-commit stats ---
+
+    def _parse_diff_stat(self, raw: str) -> dict[str, int]:
+        """Parse 'git diff --stat' summary line into structured data."""
+        result = {"files_changed": 0, "insertions": 0, "deletions": 0}
+        if not raw.strip():
+            return result
+        lines = [line for line in raw.strip().split("\n") if line.strip()]
+        if not lines:
+            return result
+        summary = lines[-1]
+        m_files = re.search(r"(\d+) files? changed", summary)
+        m_ins = re.search(r"(\d+) insertions?\(\+\)", summary)
+        m_del = re.search(r"(\d+) deletions?\(-\)", summary)
+        if m_files:
+            result["files_changed"] = int(m_files.group(1))
+        if m_ins:
+            result["insertions"] = int(m_ins.group(1))
+        if m_del:
+            result["deletions"] = int(m_del.group(1))
+        return result
+
+    def _write_commit_stats(
+        self,
+        commit_hash: str,
+        message: str,
+        wallet_state: dict[str, Any] | None,
+        source: str,
+    ) -> None:
+        """Write per-commit stats to both workspace and bridge-only directories."""
+        branch = self.current_branch() or "detached"
+        raw_stat = self._run_git("diff", "--stat", "HEAD~1", "HEAD")
+        diff_stat = self._parse_diff_stat(raw_stat.stdout)
+
+        stats = {
+            "hash": commit_hash,
+            "short_hash": commit_hash[:7],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "branch": branch,
+            "message": message,
+            "source": source,
+            "wallet": {
+                "budget_usd": wallet_state.get("budget_usd", 0),
+                "spent_usd": wallet_state.get("spent_usd", 0),
+                "remaining_usd": wallet_state.get("remaining_usd", 0),
+                "total_requests": wallet_state.get("total_requests", 0),
+                "avg_cost_per_request": wallet_state.get("avg_cost_per_request", 0),
+            } if wallet_state else None,
+            "diff_stat": diff_stat,
+        }
+
+        stats_json = json.dumps(stats, indent=2, sort_keys=True)
+        filename = f"{commit_hash}.json"
+
+        # Write to workspace (agent-discoverable)
+        ws_dir = self.workspace_dir / ".git-stats"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        (ws_dir / filename).write_text(stats_json, encoding="utf-8")
+
+        # Write to bridge-only trusted directory
+        if self.stats_dir:
+            (self.stats_dir / filename).write_text(stats_json, encoding="utf-8")
+
+    # --- Branch metadata sidecar ---
+
+    @staticmethod
+    def _sanitize_branch_name(name: str) -> str:
+        """Convert branch name to safe filename: session/foo/exp/bar -> session_foo_exp_bar"""
+        return name.replace("/", "_")
+
+    def _write_branch_metadata(
+        self,
+        branch: str,
+        parent_branch: str,
+        created_from_commit: str,
+        status: str,
+    ) -> None:
+        """Write branch metadata sidecar to workspace and bridge-only dirs."""
+        metadata = {
+            "branch": branch,
+            "parent_branch": parent_branch,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_from_commit": created_from_commit,
+            "status": status,
+            "merged_at": None,
+            "abandoned_at": None,
+            "commits": 0,
+        }
+        self._save_branch_metadata(branch, metadata)
+
+    def _update_branch_metadata(self, branch: str, new_status: str) -> None:
+        """Update an existing branch metadata sidecar status."""
+        metadata = self._load_branch_metadata(branch)
+        if metadata is None:
+            # No metadata file exists; create a minimal one
+            metadata = {
+                "branch": branch,
+                "parent_branch": "unknown",
+                "created_at": "unknown",
+                "created_from_commit": "unknown",
+                "status": new_status,
+                "merged_at": None,
+                "abandoned_at": None,
+                "commits": 0,
+            }
+        metadata["status"] = new_status
+        now = datetime.now(timezone.utc).isoformat()
+        if new_status == "merged":
+            metadata["merged_at"] = now
+        elif new_status == "abandoned":
+            metadata["abandoned_at"] = now
+        self._save_branch_metadata(branch, metadata)
+
+    def _increment_branch_commit_count(self) -> None:
+        """Increment the commit count in the current branch's metadata."""
+        branch = self.current_branch()
+        if not branch:
+            return
+        metadata = self._load_branch_metadata(branch)
+        if metadata is None:
+            return
+        metadata["commits"] = metadata.get("commits", 0) + 1
+        self._save_branch_metadata(branch, metadata)
+
+    def _save_branch_metadata(self, branch: str, metadata: dict[str, Any]) -> None:
+        """Write branch metadata to both workspace and bridge-only dirs."""
+        safe_name = self._sanitize_branch_name(branch)
+        filename = f"{safe_name}.json"
+        content = json.dumps(metadata, indent=2, sort_keys=True)
+
+        ws_branches = self.workspace_dir / ".git-stats" / "branches"
+        ws_branches.mkdir(parents=True, exist_ok=True)
+        (ws_branches / filename).write_text(content, encoding="utf-8")
+
+        if self.stats_dir:
+            bridge_branches = self.stats_dir / "branches"
+            bridge_branches.mkdir(parents=True, exist_ok=True)
+            (bridge_branches / filename).write_text(content, encoding="utf-8")
+
+    def _load_branch_metadata(self, branch: str) -> dict[str, Any] | None:
+        """Load branch metadata, preferring bridge-only copy."""
+        safe_name = self._sanitize_branch_name(branch)
+        filename = f"{safe_name}.json"
+        # Try bridge-only dir first (trusted)
+        if self.stats_dir:
+            path = self.stats_dir / "branches" / filename
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+        # Fall back to workspace
+        path = self.workspace_dir / ".git-stats" / "branches" / filename
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return None
+
 
 def create_app(
     proposals_dir: str | os.PathLike[str] | None = None,
@@ -423,6 +752,7 @@ def create_app(
         repo_dir=Path(os.getenv("GIT_REPO_DIR", "/var/lib/rsi/git-repo")),
         workspace_dir=Path(os.getenv("GIT_WORKSPACE_DIR", "/var/lib/rsi/workspace")),
         seed_dir=Path(os.getenv("SEED_DIR", "/opt/seed")),
+        stats_dir=Path(os.getenv("GIT_STATS_DIR", "/var/lib/rsi/git-stats")),
     )
     app.state.litellm_base_url = litellm_base_url or default_litellm_base_url
     app.state.operator_messages_dir = Path(os.getenv("OPERATOR_MESSAGES_DIR", "/var/lib/rsi/operator_messages"))
@@ -639,11 +969,14 @@ def create_app(
         message = str(payload.get("message", "")).strip()
         if not message:
             raise HTTPException(status_code=400, detail="message is required")
-        return app.state.git_manager.commit(message)
+        source = str(payload.get("source", "agent_edit"))
+        wallet_state = app.state.spend_tracker.wallet_payload()
+        return app.state.git_manager.commit(message, wallet_state=wallet_state, source=source)
 
     @app.post("/git/revert/{ref:path}")
     def git_revert(ref: str) -> dict[str, Any]:
-        result = app.state.git_manager.revert(ref)
+        wallet_state = app.state.spend_tracker.wallet_payload()
+        result = app.state.git_manager.revert(ref, wallet_state=wallet_state)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return result
@@ -670,6 +1003,64 @@ def create_app(
     @app.post("/git/push")
     def git_push() -> dict[str, Any]:
         return app.state.git_manager.push()
+
+    # --- Git evolution endpoints (branch/checkout/merge/tag) ---
+
+    @app.post("/git/branch")
+    def git_branch(payload: dict[str, Any]) -> dict[str, Any]:
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        result = app.state.git_manager.create_branch(name)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+
+    @app.post("/git/checkout")
+    def git_checkout(payload: dict[str, Any]) -> dict[str, Any]:
+        ref = str(payload.get("ref", "")).strip()
+        if not ref:
+            raise HTTPException(status_code=400, detail="ref is required")
+        result = app.state.git_manager.checkout(ref)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+
+    @app.post("/git/merge")
+    def git_merge(payload: dict[str, Any]) -> dict[str, Any]:
+        branch = str(payload.get("branch", "")).strip()
+        if not branch:
+            raise HTTPException(status_code=400, detail="branch is required")
+        result = app.state.git_manager.merge(branch)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+
+    @app.get("/git/branches")
+    def git_branches() -> dict[str, Any]:
+        return app.state.git_manager.list_branches()
+
+    @app.delete("/git/branch/{name:path}")
+    def git_delete_branch(name: str) -> dict[str, Any]:
+        result = app.state.git_manager.delete_branch(name)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+
+    @app.post("/git/tag")
+    def git_tag(payload: dict[str, Any]) -> dict[str, Any]:
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        ref = str(payload.get("ref", "HEAD")).strip()
+        result = app.state.git_manager.tag(name, ref)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+
+    @app.get("/git/tags")
+    def git_tags() -> list[dict[str, str]]:
+        return app.state.git_manager.list_tags()
 
     # --- Operator tooling endpoints ---
 
