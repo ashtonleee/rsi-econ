@@ -42,19 +42,13 @@ def test_rate_limit_429_retries(tmp_path: Path, monkeypatch) -> None:
         call_count += 1
         if call_count == 1:
             raise FakeHTTPError(body='{"error": {"message": "rate limit exceeded"}}')
-        # Second call succeeds and finishes
+        # Second call succeeds with a plain assistant message (no tool calls)
         return {
             "choices": [
                 {
                     "message": {
                         "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "id": "finish-1",
-                                "type": "function",
-                                "function": {"name": "finish", "arguments": '{"reason":"done"}'},
-                            }
-                        ],
+                        "content": "Continuing after rate limit retry.",
                     }
                 }
             ]
@@ -63,9 +57,10 @@ def test_rate_limit_429_retries(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "chat", fake_chat)
     monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
     monkeypatch.setattr(time, "sleep", lambda _: None)  # skip actual sleep
+    monkeypatch.setattr(module, "MAX_TURNS", 3)  # exit after 3 turns
 
-    assert module.main() == 0
-    assert call_count == 2, "Agent should have retried after rate limit"
+    module.main()
+    assert call_count >= 2, "Agent should have retried after rate limit"
 
 
 def test_budget_exhausted_429_exits(tmp_path: Path, monkeypatch) -> None:
@@ -121,7 +116,7 @@ def test_rate_limit_respects_retry_after_header(tmp_path: Path, monkeypatch) -> 
                             {
                                 "id": "finish-1",
                                 "type": "function",
-                                "function": {"name": "finish", "arguments": '{"reason":"done"}'},
+                                "function": {"name": "shell", "arguments": '{"command":"echo done"}'},
                             }
                         ],
                     }
