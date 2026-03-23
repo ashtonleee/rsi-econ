@@ -382,14 +382,39 @@ def trim_messages(messages: list[dict], max_messages: int = MAX_CONTEXT_MESSAGES
     """Trim conversation history to manage context size.
 
     Keeps the system prompt (first message) plus the most recent messages.
+    Respects tool-call boundaries so we never orphan tool results or
+    assistant messages that contain tool_calls.
     """
     if len(messages) <= max_messages:
         return messages
-    dropped = len(messages) - max_messages
-    print(f"[agent] context truncated: {dropped} messages dropped", flush=True)
     system = messages[:1]
-    recent = messages[-(max_messages - 1):]
-    return system + recent
+    tail = messages[-(max_messages - 1):]
+    # Walk forward from the cut point: skip orphaned tool-result messages
+    # whose assistant tool_calls were dropped, and skip assistant messages
+    # whose tool results were dropped.
+    start = 0
+    while start < len(tail):
+        msg = tail[start]
+        if msg.get("role") == "tool":
+            # orphaned tool result — its assistant was trimmed
+            start += 1
+            continue
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            # check that ALL tool results for this call are still present
+            call_ids = {tc["id"] for tc in msg["tool_calls"]}
+            remaining_tool_ids = {
+                m.get("tool_call_id") for m in tail[start + 1:]
+                if m.get("role") == "tool"
+            }
+            if not call_ids.issubset(remaining_tool_ids):
+                start += 1
+                continue
+        break
+    trimmed = system + tail[start:]
+    dropped = len(messages) - len(trimmed)
+    if dropped > 0:
+        print(f"[agent] context truncated: {dropped} messages dropped", flush=True)
+    return trimmed
 
 
 COMPACTION_TURN_INTERVAL = 30
@@ -562,7 +587,10 @@ def main() -> int:
             print(f"[agent v2] API error #{consecutive_errors}: {exc}", flush=True)
             if consecutive_errors >= 3:
                 print("[agent v2] 3 consecutive errors — resetting conversation", flush=True)
-                messages = [messages[0]]  # keep only system prompt
+                messages = [
+                    messages[0],
+                    {"role": "user", "content": "Previous conversation was reset due to errors. Continue working toward your objective."},
+                ]
                 main._consecutive_errors = 0
             time.sleep(5)
             continue
@@ -577,6 +605,10 @@ def main() -> int:
         if raw_msg.get("tool_calls"):
             msg["tool_calls"] = raw_msg["tool_calls"]
         messages.append(msg)
+
+        # Reset empty-response counter on any real response
+        if msg.get("tool_calls") or msg.get("content"):
+            main._empty_count = 0
 
         # Handle tool calls
         tool_calls = msg.get("tool_calls")
@@ -616,9 +648,15 @@ def main() -> int:
             # Assistant responded with text, continue
             print(f"[agent v2] thinking (turn {turn})", flush=True)
         else:
-            # No content and no tool calls — stop
-            print("[agent v2] empty response, exiting", flush=True)
-            break
+            # No content and no tool calls — nudge the model to continue
+            empty_count = getattr(main, '_empty_count', 0) + 1
+            main._empty_count = empty_count
+            if empty_count >= 3:
+                print("[agent v2] 3 consecutive empty responses, exiting", flush=True)
+                break
+            print(f"[agent v2] empty response #{empty_count}, nudging", flush=True)
+            messages.append({"role": "user", "content": "Continue working toward your objective. Use tools to take action."})
+            continue
 
     # Clean up browser before exit
     if _browser_tool is not None:
