@@ -14,6 +14,7 @@ MAIN_PATH = WORKSPACE / "main.py"
 RESTART_PATH = WORKSPACE / ".restart_requested"
 PAUSED_PATH = WORKSPACE / ".paused"
 RESUME_PATH = WORKSPACE / ".resume"
+PUSH_REQUESTED_PATH = WORKSPACE / ".push_requested"
 CRASH_WINDOW_SECONDS = int(os.getenv("RSI_CRASH_WINDOW_SECONDS", "30"))
 RESUME_POLL_SECONDS = int(os.getenv("RSI_RESUME_POLL_SECONDS", "5"))
 RESTART_STOP_TIMEOUT_SECONDS = int(os.getenv("RSI_RESTART_STOP_TIMEOUT_SECONDS", "10"))
@@ -88,6 +89,11 @@ def commit_restart() -> bool | None:
         f"self-edit {timestamp}",
     ):
         return None
+    # Signal host to push (host watches for this flag on bind-mounted workspace)
+    try:
+        PUSH_REQUESTED_PATH.write_text(timestamp + "\n", encoding="utf-8")
+    except OSError:
+        pass
     return True
 
 
@@ -185,6 +191,10 @@ def launch_agent(after_edit: bool = False) -> int:
 
         if exit_code == 0:
             log("EXIT", "agent exited cleanly")
+            try:
+                PUSH_REQUESTED_PATH.write_text("clean-exit\n", encoding="utf-8")
+            except OSError:
+                pass
             try_git_push()
             return 0
 

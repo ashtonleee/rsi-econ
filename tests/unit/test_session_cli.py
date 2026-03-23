@@ -29,7 +29,7 @@ def cli():
 
 @pytest.fixture()
 def git_repo(tmp_path: Path):
-    """Create a minimal git repo to simulate sandbox/seed."""
+    """Create a minimal git repo to simulate sandbox/seed with a main branch."""
     subprocess.run(["git", "init", str(tmp_path)], capture_output=True, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
@@ -45,8 +45,9 @@ def git_repo(tmp_path: Path):
         ["git", "commit", "-m", "seed"],
         cwd=str(tmp_path), capture_output=True, check=True,
     )
+    # Rename default branch to main
     subprocess.run(
-        ["git", "branch", "seed"],
+        ["git", "branch", "-M", "main"],
         cwd=str(tmp_path), capture_output=True, check=True,
     )
     return tmp_path
@@ -56,10 +57,8 @@ def test_status_formats_output(cli, git_repo, capsys) -> None:
     """cmd_status prints session info without crashing."""
     import argparse
 
-    # Patch SEED_DIR to our test repo
     cli.SEED_DIR = git_repo
 
-    # Mock docker compose (not available in test)
     def fake_compose(*args):
         r = MagicMock()
         r.returncode = 1
@@ -76,7 +75,7 @@ def test_status_formats_output(cli, git_repo, capsys) -> None:
     assert "State:" in output
 
 
-def test_new_creates_fresh_branch(cli, git_repo) -> None:
+def test_new_creates_session_branch(cli, git_repo) -> None:
     import argparse
 
     cli.SEED_DIR = git_repo
@@ -92,12 +91,12 @@ def test_new_creates_fresh_branch(cli, git_repo) -> None:
         result = cli.cmd_new(argparse.Namespace(name="test1"))
 
     assert result == 0
-    # Check branch exists
+    # Check branch exists with session/ prefix
     branches = subprocess.run(
-        ["git", "branch", "--list", "session-test1"],
+        ["git", "branch", "--list"],
         cwd=str(git_repo), capture_output=True, text=True, check=False,
     )
-    assert "session-test1" in branches.stdout
+    assert "session/test1" in branches.stdout
 
 
 def test_list_shows_session_branches(cli, git_repo, capsys) -> None:
@@ -107,7 +106,7 @@ def test_list_shows_session_branches(cli, git_repo, capsys) -> None:
 
     # Create a session branch
     subprocess.run(
-        ["git", "checkout", "-b", "session-demo"],
+        ["git", "checkout", "-b", "session/demo"],
         cwd=str(git_repo), capture_output=True, check=True,
     )
     (git_repo / "main.py").write_text("# edited\n")
@@ -120,7 +119,7 @@ def test_list_shows_session_branches(cli, git_repo, capsys) -> None:
     result = cli.cmd_list(argparse.Namespace())
     assert result == 0
     output = capsys.readouterr().out
-    assert "session-demo" in output
+    assert "session/demo" in output
 
 
 def test_fork_creates_branch_from_source(cli, git_repo) -> None:
@@ -130,7 +129,7 @@ def test_fork_creates_branch_from_source(cli, git_repo) -> None:
 
     # Create source branch
     subprocess.run(
-        ["git", "checkout", "-b", "session-source"],
+        ["git", "checkout", "-b", "session/source"],
         cwd=str(git_repo), capture_output=True, check=True,
     )
     (git_repo / "main.py").write_text("# source code\n")
@@ -148,12 +147,23 @@ def test_fork_creates_branch_from_source(cli, git_repo) -> None:
         return r
 
     with patch.object(cli, "docker_compose", fake_compose):
-        result = cli.cmd_fork(argparse.Namespace(branch="session-source", name="forked1"))
+        result = cli.cmd_fork(argparse.Namespace(branch="session/source", name="forked1"))
 
     assert result == 0
     # Verify fork branch exists and has the source content
     show = subprocess.run(
-        ["git", "show", "session-forked1:main.py"],
+        ["git", "show", "session/forked1:main.py"],
         cwd=str(git_repo), capture_output=True, text=True, check=False,
     )
     assert "source code" in show.stdout
+
+
+def test_push_fails_without_remote(cli, git_repo, capsys) -> None:
+    import argparse
+
+    cli.SEED_DIR = git_repo
+
+    result = cli.cmd_push(argparse.Namespace())
+    assert result == 1
+    output = capsys.readouterr().err
+    assert "no 'origin' remote" in output

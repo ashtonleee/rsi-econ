@@ -101,7 +101,7 @@ services:
       WALLET_URL: http://bridge:8081
       RSI_MODEL: ${RSI_MODEL:-default}
       RSI_MAX_TURNS: ${RSI_MAX_TURNS:-0}
-      # GIT_REMOTE_URL: ${GIT_REMOTE_URL:-}  # Uncomment to enable git push on exit
+      GIT_REMOTE_URL: ${GIT_REMOTE_URL:-}  # Set in .env to enable session persistence to GitHub
     volumes:
       - ./sandbox/seed:/workspace/agent
       - ./sandbox/supervisor.py:/opt/supervisor/supervisor.py:ro

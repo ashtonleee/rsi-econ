@@ -17,7 +17,6 @@ WORKSPACE = Path(os.getenv("RSI_AGENT_WORKSPACE", "/workspace/agent"))
 SYSTEM_PROMPT_PATH = WORKSPACE / "SYSTEM.md"
 HISTORY_PATH = WORKSPACE / "history.jsonl"
 KNOWLEDGE_PATH = WORKSPACE / "knowledge.json"
-TASK_QUEUE_PATH = WORKSPACE / "tasks.json"
 LITELLM_URL = os.getenv("LITELLM_URL", "http://litellm:4000")
 WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
 
@@ -340,25 +339,6 @@ def save_knowledge(knowledge: dict) -> None:
     KNOWLEDGE_PATH.write_text(json.dumps(knowledge, indent=2))
 
 
-def load_tasks() -> list:
-    """Load task queue."""
-    if TASK_QUEUE_PATH.exists():
-        try:
-            return json.loads(TASK_QUEUE_PATH.read_text())
-        except Exception:
-            pass
-    return [
-        {"id": 1, "task": "research_ai_providers", "status": "pending", "description": "Search for free AI API providers and free tiers"},
-        {"id": 2, "task": "check_proxy_domains", "status": "pending", "description": "Test which domains are accessible through proxy"},
-        {"id": 3, "task": "explore_litellm_config", "status": "pending", "description": "Check if litellm can be configured with additional providers"},
-        {"id": 4, "task": "setup_caching", "status": "pending", "description": "Implement response caching to save tokens"},
-        {"id": 5, "task": "optimize_prompts", "status": "pending", "description": "Minimize system prompt size and context to reduce costs"},
-    ]
-
-
-def save_tasks(tasks: list) -> None:
-    TASK_QUEUE_PATH.write_text(json.dumps(tasks, indent=2))
-
 
 def chat(messages: list[dict], model: str = None, tools: list | None = None) -> dict:
     """Make an LLM API call."""
@@ -498,13 +478,9 @@ def append_history(entry: dict) -> None:
         handle.write("\n")
 
 
-def build_system_prompt(knowledge: dict, wallet: dict, tasks: list) -> str:
+def build_system_prompt(knowledge: dict, wallet: dict) -> str:
     """Build a concise system prompt with current state."""
     base = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8") if SYSTEM_PROMPT_PATH.exists() else "You are an AI agent."
-
-    # Add compact state summary
-    pending_tasks = [t for t in tasks if t["status"] == "pending"]
-    task_summary = "\n".join(f"- {t['description']}" for t in pending_tasks[:5])
 
     all_findings = knowledge.get("findings", [])
     findings = "\n".join(f"- {f}" for f in all_findings[-20:])
@@ -518,20 +494,27 @@ def build_system_prompt(knowledge: dict, wallet: dict, tasks: list) -> str:
 - Restart count: {knowledge.get('restarts', 0)}
 - Model: {MODEL}
 
-## Pending Tasks
-{task_summary or "None"}
-
 ## Key Findings
 {findings or "None yet"}
-
-## Priority Actions
-1. Research free/cheap AI providers by searching the web
-2. Test proxy access to AI provider domains
-3. Propose domain access for promising providers
-4. Optimize own code for efficiency
-5. If budget < $1, focus on preserving knowledge and finishing cleanly
 """
     return base + state
+
+
+def load_recent_history() -> list[dict]:
+    """Load recent history entries for continuity across restarts."""
+    if not HISTORY_PATH.exists():
+        return []
+    recent = []
+    try:
+        lines = HISTORY_PATH.read_text(encoding="utf-8").strip().split("\n")
+        for line in lines[-20:]:
+            try:
+                recent.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        pass
+    return recent
 
 
 def main() -> int:
@@ -542,29 +525,46 @@ def main() -> int:
     save_knowledge(knowledge)
 
     wallet = get_wallet()
-    tasks = load_tasks()
 
     remaining = wallet.get("remaining_usd", 0)
-    print(f"[agent v2] started  ${remaining:.2f} remaining, restart #{knowledge['restarts']}", flush=True)
+    prefix = f"[agent:{MODEL}]"
+    print(f"{prefix} started  ${remaining:.2f} remaining, restart #{knowledge['restarts']}", flush=True)
 
     # Emergency mode: if budget is very low, just save state and exit
     if remaining < 0.50:
-        print("[agent v2] CRITICAL: budget very low, preserving state and exiting", flush=True)
+        print(f"{prefix} CRITICAL: budget very low, preserving state and exiting", flush=True)
         knowledge["findings"].append(f"Low budget exit at ${remaining:.2f}")
         save_knowledge(knowledge)
         return 0
 
-    system_prompt = build_system_prompt(knowledge, wallet, tasks)
+    # Write restart marker to history
+    append_history({"event": "restart", "restart": knowledge["restarts"]})
+
+    system_prompt = build_system_prompt(knowledge, wallet)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "Begin working toward your objective. Use tools to take action."},
     ]
 
+    # Load recent history for continuity across restarts
+    recent = load_recent_history()
+    if recent:
+        summaries = []
+        for entry in recent:
+            if entry.get("role") == "assistant" and entry.get("content"):
+                summaries.append(f"[Previous thinking] {entry['content'][:500]}")
+            elif entry.get("role") == "tool":
+                summaries.append(f"[Previous result] {entry.get('name', '?')}: {entry.get('result', '')[:300]}")
+        if summaries:
+            context = f"[RESUMING SESSION] You were restarted (restart #{knowledge.get('restarts', 0)}). Here's what you were doing:\n" + "\n".join(summaries[-10:])
+            messages.append({"role": "user", "content": context})
+            print(f"{prefix} loaded {len(summaries)} entries from previous session", flush=True)
+
     turn = 0
     while True:
         turn += 1
         if MAX_TURNS > 0 and turn > MAX_TURNS:
-            print(f"[agent v2] reached turn limit ({MAX_TURNS}), exiting", flush=True)
+            print(f"{prefix} reached turn limit ({MAX_TURNS}), exiting", flush=True)
             break
 
         # Truncate context if needed
@@ -580,13 +580,13 @@ def main() -> int:
             response = chat(messages, tools=TOOLS)
         except Exception as exc:
             if "429" in str(exc):
-                print("[agent v2] 429 — budget exhausted, exiting", flush=True)
+                print(f"{prefix} 429 — budget exhausted, exiting", flush=True)
                 break
             consecutive_errors = getattr(main, '_consecutive_errors', 0) + 1
             main._consecutive_errors = consecutive_errors
-            print(f"[agent v2] API error #{consecutive_errors}: {exc}", flush=True)
+            print(f"{prefix} API error #{consecutive_errors}: {exc}", flush=True)
             if consecutive_errors >= 3:
-                print("[agent v2] 3 consecutive errors — resetting conversation", flush=True)
+                print(f"{prefix} 3 consecutive errors — resetting conversation", flush=True)
                 messages = [
                     messages[0],
                     {"role": "user", "content": "Previous conversation was reset due to errors. Continue working toward your objective."},
@@ -606,6 +606,9 @@ def main() -> int:
             msg["tool_calls"] = raw_msg["tool_calls"]
         messages.append(msg)
 
+        # Log assistant message to history
+        append_history({"turn": turn, "role": "assistant", "content": msg.get("content"), "tool_calls": msg.get("tool_calls")})
+
         # Reset empty-response counter on any real response
         if msg.get("tool_calls") or msg.get("content"):
             main._empty_count = 0
@@ -621,13 +624,15 @@ def main() -> int:
                 except json.JSONDecodeError:
                     tool_args = {}
 
-                print(f"[agent v2] tool: {tool_name}", flush=True)
+                print(f"{prefix} tool: {tool_name}", flush=True)
                 result = execute_tool(tool_name, tool_args)
+
+                # Log tool result to history
+                append_history({"turn": turn, "role": "tool", "name": tool_name, "result": result[:500]})
 
                 if result == "FINISH":
                     reason = tool_args.get("reason", "no reason given")
-                    print(f"[agent v2] finishing: {reason}", flush=True)
-                    # Clean up browser
+                    print(f"{prefix} finishing: {reason}", flush=True)
                     if _browser_tool is not None:
                         _browser_tool.close()
                         _browser_tool = None
@@ -645,16 +650,15 @@ def main() -> int:
                     "content": result,
                 })
         elif msg.get("content"):
-            # Assistant responded with text, continue
-            print(f"[agent v2] thinking (turn {turn})", flush=True)
+            print(f"{prefix} thinking (turn {turn})", flush=True)
         else:
             # No content and no tool calls — nudge the model to continue
             empty_count = getattr(main, '_empty_count', 0) + 1
             main._empty_count = empty_count
             if empty_count >= 3:
-                print("[agent v2] 3 consecutive empty responses, exiting", flush=True)
+                print(f"{prefix} 3 consecutive empty responses, exiting", flush=True)
                 break
-            print(f"[agent v2] empty response #{empty_count}, nudging", flush=True)
+            print(f"{prefix} empty response #{empty_count}, nudging", flush=True)
             messages.append({"role": "user", "content": "Continue working toward your objective. Use tools to take action."})
             continue
 

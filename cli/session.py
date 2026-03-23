@@ -7,6 +7,7 @@ Usage:
     python cli/session.py resume           # Resume agent
     python cli/session.py new [--name X]   # Reset to seed, new git branch
     python cli/session.py list             # List all session branches
+    python cli/session.py push             # Push current branch to GitHub
     python cli/session.py fork <branch>    # Fork from another session's state
 """
 
@@ -56,8 +57,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
     branch_name = branch.stdout.strip() or "(detached)"
     log = git("rev-list", "--count", "HEAD")
     commit_count = log.stdout.strip() or "?"
-    last_edit = git("log", "-1", "--format=%ci", "--diff-filter=M", "--", "main.py")
-    last_edit_time = last_edit.stdout.strip() or "never"
+    last_commit = git("log", "-1", "--format=%h %s (%cr)")
+    last_commit_info = last_commit.stdout.strip() or "none"
 
     # Paused?
     paused_path = SEED_DIR / ".paused"
@@ -74,11 +75,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
         pass
 
     state = "paused" if paused else ("running" if running else "stopped")
-    print(f"Session:       {branch_name}")
-    print(f"State:         {state}")
-    print(f"Commits:       {commit_count}")
-    print(f"Budget:        {remaining}")
-    print(f"Last self-edit: {last_edit_time}")
+    print(f"Session:     {branch_name}")
+    print(f"State:       {state}")
+    print(f"Commits:     {commit_count}")
+    print(f"Budget:      {remaining}")
+    print(f"Last commit: {last_commit_info}")
     return 0
 
 
@@ -104,58 +105,86 @@ def cmd_resume(_args: argparse.Namespace) -> int:
 
 
 def cmd_new(args: argparse.Namespace) -> int:
-    name = args.name or f"session-{int(time.time())}"
-    if not name.startswith("session-"):
-        name = f"session-{name}"
+    name = args.name or f"{int(time.time())}"
+    branch = f"session/{name}"
 
     # Stop sandbox
     print("Stopping sandbox...")
     docker_compose("stop", "sandbox")
 
-    # Save current branch and create new
+    # Switch to main and create session branch
     current = git("branch", "--show-current").stdout.strip()
     print(f"Current branch: {current}")
 
-    # Create new branch
-    result = git("checkout", "-b", name)
+    git("checkout", "main")
+    result = git("checkout", "-b", branch)
     if result.returncode != 0:
         print(f"Error creating branch: {result.stderr.strip()}", file=sys.stderr)
         return 1
 
-    # Reset to seed state
-    git("checkout", "seed", "--", ".")
-    git("clean", "-fd")
-    git("add", "-A")
-    git("commit", "-m", "session start (from seed)")
-
     # Start sandbox
     print("Starting sandbox...")
     docker_compose("start", "sandbox")
-    print(f"New session: {name}")
+    print(f"New session: {branch}")
     return 0
 
 
 def cmd_list(_args: argparse.Namespace) -> int:
-    result = git("branch", "--list", "session-*", "--format=%(refname:short)")
+    result = git("branch", "-a", "--format=%(refname:short)")
     if result.returncode != 0 or not result.stdout.strip():
-        print("No session branches found.")
+        print("No branches found.")
         return 0
 
     branches = result.stdout.strip().split("\n")
-    for branch in branches:
+    session_branches = [b for b in branches if "session/" in b]
+    if not session_branches:
+        print("No session branches found.")
+        return 0
+
+    current = git("branch", "--show-current").stdout.strip()
+    for branch in session_branches:
+        marker = "* " if branch == current else "  "
         info = git("log", "-1", "--format=%h %s (%cr)", branch)
         count = git("rev-list", "--count", branch)
         commits = count.stdout.strip() or "?"
         detail = info.stdout.strip() or ""
-        print(f"  {branch}  [{commits} commits]  {detail}")
+        print(f"{marker}{branch}  [{commits} commits]  {detail}")
+    return 0
+
+
+def cmd_push(_args: argparse.Namespace) -> int:
+    # Push from host side (sandbox can't reach GitHub)
+    branch = git("branch", "--show-current").stdout.strip()
+    if not branch:
+        print("Error: not on a branch.", file=sys.stderr)
+        return 1
+
+    # Check remote exists
+    remote = git("remote", "get-url", "origin")
+    if remote.returncode != 0:
+        print("Error: no 'origin' remote configured.", file=sys.stderr)
+        print("Set up with: git -C sandbox/seed remote add origin <url>", file=sys.stderr)
+        return 1
+
+    print(f"Pushing {branch} to origin...")
+    result = git("push", "-u", "origin", branch)
+    if result.returncode != 0:
+        print(f"Error: {result.stderr.strip()}", file=sys.stderr)
+        return 1
+
+    # Clear push_requested flag if present
+    flag = SEED_DIR / ".push_requested"
+    if flag.exists():
+        flag.unlink()
+
+    print(f"Pushed {branch} to {remote.stdout.strip()}")
     return 0
 
 
 def cmd_fork(args: argparse.Namespace) -> int:
     source = args.branch
     name = args.name or f"fork-{int(time.time())}"
-    if not name.startswith("session-"):
-        name = f"session-{name}"
+    branch = f"session/{name}"
 
     # Verify source branch exists
     check = git("rev-parse", "--verify", source)
@@ -167,7 +196,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
     print("Stopping sandbox...")
     docker_compose("stop", "sandbox")
 
-    result = git("checkout", "-b", name, source)
+    result = git("checkout", "-b", branch, source)
     if result.returncode != 0:
         print(f"Error: {result.stderr.strip()}", file=sys.stderr)
         return 1
@@ -175,7 +204,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
     # Start sandbox
     print("Starting sandbox...")
     docker_compose("start", "sandbox")
-    print(f"Forked {source} → {name}")
+    print(f"Forked {source} → {branch}")
     return 0
 
 
@@ -188,9 +217,10 @@ def main() -> int:
     sub.add_parser("resume", help="Resume the agent")
 
     new_p = sub.add_parser("new", help="Start a new session from seed")
-    new_p.add_argument("--name", help="Session name (default: session-<timestamp>)")
+    new_p.add_argument("--name", help="Session name (default: timestamp)")
 
     sub.add_parser("list", help="List all session branches")
+    sub.add_parser("push", help="Push current branch to GitHub")
 
     fork_p = sub.add_parser("fork", help="Fork from another session")
     fork_p.add_argument("branch", help="Source branch to fork from")
@@ -203,6 +233,7 @@ def main() -> int:
         "resume": cmd_resume,
         "new": cmd_new,
         "list": cmd_list,
+        "push": cmd_push,
         "fork": cmd_fork,
     }
 
