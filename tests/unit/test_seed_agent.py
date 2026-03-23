@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 from urllib import error as urllib_error
 
@@ -17,9 +18,11 @@ def load_seed_agent(tmp_path: Path):
     os.environ["WALLET_URL"] = "http://bridge:8081"
     os.environ["RSI_MODEL"] = "default"
     os.environ["RSI_MAX_TURNS"] = "5"
-    spec = importlib.util.spec_from_file_location(f"test_seed_agent_{tmp_path.name}", SEED_AGENT_PATH)
+    module_name = f"test_seed_agent_{tmp_path.name}"
+    spec = importlib.util.spec_from_file_location(module_name, SEED_AGENT_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -59,9 +62,9 @@ def test_agent_reads_system_prompt_as_system_message(tmp_path: Path, monkeypatch
                         "role": "assistant",
                         "tool_calls": [
                             {
-                                "id": "finish-1",
+                                "id": "restart-1",
                                 "type": "function",
-                                "function": {"name": "finish", "arguments": '{"reason":"done"}'},
+                                "function": {"name": "request_restart", "arguments": "{}"},
                             }
                         ],
                     }
@@ -128,7 +131,7 @@ def test_agent_parses_tool_calls_and_executes_shell(tmp_path: Path, monkeypatch)
                                 {
                                     "id": "tool-2",
                                     "type": "function",
-                                    "function": {"name": "finish", "arguments": '{"reason":"done"}'},
+                                    "function": {"name": "request_restart", "arguments": "{}"},
                                 }
                             ],
                         }
@@ -194,33 +197,13 @@ def test_request_restart_creates_marker_and_exits_cleanly(tmp_path: Path, monkey
     assert (tmp_path / ".restart_requested").exists()
 
 
-def test_finish_tool_exits_cleanly(tmp_path: Path, monkeypatch) -> None:
+def test_finish_tool_returns_error(tmp_path: Path) -> None:
+    """finish tool is removed — it should return an error string, not stop the agent."""
     write_agent_workspace(tmp_path)
     module = load_seed_agent(tmp_path)
-
-    monkeypatch.setattr(
-        module,
-        "chat",
-        lambda messages, model=None, tools=None: {  # noqa: ARG005
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "id": "finish-1",
-                                "type": "function",
-                                "function": {"name": "finish", "arguments": '{"reason":"done"}'},
-                            }
-                        ],
-                    }
-                }
-            ]
-        },
-    )
-    monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
-
-    assert module.main() == 0
+    result = module.execute_tool("finish", {"reason": "done"})
+    assert "ERROR" in result
+    assert "removed" in result
 
 
 def test_http_429_causes_clean_exit(tmp_path: Path, monkeypatch) -> None:
@@ -243,9 +226,121 @@ def test_low_budget_exits_immediately(tmp_path: Path, monkeypatch) -> None:
     assert module.main() == 0
 
 
-def test_tool_definitions_include_all_10_tools(tmp_path: Path) -> None:
+def test_tool_definitions_include_expected_tools(tmp_path: Path) -> None:
     module = load_seed_agent(tmp_path)
     tool_names = {t["function"]["name"] for t in module.TOOLS}
+    # finish tool removed; 9 tools remain
     expected = {"shell", "read_file", "write_file", "edit_file", "grep",
-                "request_restart", "finish", "web_search", "browse_url", "screenshot"}
+                "request_restart", "web_search", "browse_url", "screenshot"}
     assert tool_names == expected
+
+
+# ── New tests for this changeset ────────────────────────────────────
+
+
+def test_reasoning_log_written(tmp_path: Path, monkeypatch) -> None:
+    """After assistant message with content, reasoning.jsonl gets an entry."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    call_count = 0
+
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "choices": [{"message": {"role": "assistant", "content": "I should research providers."}}]
+            }
+        return {
+            "choices": [{"message": {"role": "assistant", "tool_calls": [
+                {"id": "r1", "type": "function", "function": {"name": "request_restart", "arguments": "{}"}}
+            ]}}]
+        }
+
+    monkeypatch.setattr(module, "chat", fake_chat)
+    monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
+
+    assert module.main() == 0
+
+    reasoning_path = tmp_path / "reasoning.jsonl"
+    assert reasoning_path.exists()
+    entries = [json.loads(line) for line in reasoning_path.read_text().strip().split("\n") if line.strip()]
+    assert len(entries) >= 1
+    assert "research providers" in entries[0]["content"]
+    assert "timestamp" in entries[0]
+    assert "turn" in entries[0]
+
+
+def test_chat_accepts_model_param(tmp_path: Path, monkeypatch) -> None:
+    """chat() forwards the model parameter to LiteLLM."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout=0):  # noqa: ANN001
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse({"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    monkeypatch.setattr(module.urllib_request, "urlopen", fake_urlopen)
+
+    module.chat([{"role": "system", "content": "hi"}], model="gpt-4.1")
+    assert captured["body"]["model"] == "gpt-4.1"
+
+
+def test_no_message_count_limit(tmp_path: Path) -> None:
+    """There should be no MAX_CONTEXT_MESSAGES constant."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    assert not hasattr(module, "MAX_CONTEXT_MESSAGES")
+    assert not hasattr(module, "trim_messages")
+
+
+def test_compaction_at_token_threshold(tmp_path: Path) -> None:
+    """Compaction threshold should be 500k tokens."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    assert module.COMPACTION_TOKEN_THRESHOLD == 500000
+
+
+def test_time_in_context_log(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Session time/elapsed appears in agent log output at turn 10."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    os.environ["RSI_MAX_TURNS"] = "11"
+    # Reload to pick up MAX_TURNS=11
+    module.MAX_TURNS = 11
+
+    call_count = 0
+
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
+        return {"choices": [{"message": {"role": "assistant", "content": f"thinking turn {call_count}"}}]}
+
+    monkeypatch.setattr(module, "chat", fake_chat)
+    monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
+
+    module.main()
+    captured = capsys.readouterr()
+    # At turn 10, the periodic log should include elapsed time and remaining budget
+    assert "elapsed" in captured.out
+    assert "remaining" in captured.out
+
+
+def test_no_knowledge_json_references(tmp_path: Path) -> None:
+    """No KNOWLEDGE_PATH, load_knowledge, or save_knowledge in module."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    assert not hasattr(module, "KNOWLEDGE_PATH")
+    assert not hasattr(module, "load_knowledge")
+    assert not hasattr(module, "save_knowledge")
+
+
+def test_build_system_prompt_no_knowledge_param(tmp_path: Path) -> None:
+    """build_system_prompt takes wallet only, no knowledge parameter."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    import inspect
+    sig = inspect.signature(module.build_system_prompt)
+    params = list(sig.parameters.keys())
+    assert params == ["wallet"]

@@ -1,10 +1,13 @@
 history.jsonl
+reasoning.jsonl
+agent_status.json
 .restart_requested
 .push_requested
 .paused
 .resume
 __pycache__/
 screenshot.png
+latest_screenshot.png
 knowledge.json
 cache.json
 last_compaction_summary.md

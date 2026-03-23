@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 
@@ -18,11 +19,11 @@ def load_seed_agent(tmp_path: Path):
     os.environ["WALLET_URL"] = "http://bridge:8081"
     os.environ["RSI_MODEL"] = "default"
     os.environ["RSI_MAX_TURNS"] = "5"
-    spec = importlib.util.spec_from_file_location(
-        f"test_compaction_{tmp_path.name}", SEED_AGENT_PATH
-    )
+    module_name = f"test_compaction_{tmp_path.name}"
+    spec = importlib.util.spec_from_file_location(module_name, SEED_AGENT_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -37,7 +38,6 @@ def test_estimate_tokens(tmp_path: Path) -> None:
 
 def test_compact_context_reduces_to_two_messages(tmp_path: Path, monkeypatch) -> None:
     mod = load_seed_agent(tmp_path)
-    knowledge = mod.load_knowledge()
 
     # Mock chat() so compaction doesn't need a real LLM
     monkeypatch.setattr(mod, "chat", lambda messages, **kw: {
@@ -52,38 +52,14 @@ def test_compact_context_reduces_to_two_messages(tmp_path: Path, monkeypatch) ->
         {"role": "assistant", "content": "Great"},
     ] * 10  # 50 messages
     messages[0] = {"role": "system", "content": "You are an agent."}
-    result = mod.compact_context(messages, knowledge)
+    result = mod.compact_context(messages)
     assert len(result) == 2
     assert result[0]["role"] == "system"
     assert "CONTEXT COMPACTED" in result[1]["content"]
 
 
-def test_compact_context_saves_summary_to_knowledge(tmp_path: Path, monkeypatch) -> None:
-    mod = load_seed_agent(tmp_path)
-    knowledge = mod.load_knowledge()
-
-    monkeypatch.setattr(mod, "chat", lambda messages, **kw: {
-        "choices": [{"message": {"role": "assistant", "content": "Found openrouter free models and groq API"}}]
-    })
-
-    messages = [
-        {"role": "system", "content": "You are an agent."},
-        {"role": "tool", "content": "https://openrouter.ai free access"},
-    ]
-    mod.compact_context(messages, knowledge)
-
-    # Knowledge should have session_summaries
-    k_path = tmp_path / "knowledge.json"
-    assert k_path.exists()
-    saved = json.loads(k_path.read_text())
-    assert "session_summaries" in saved
-    assert len(saved["session_summaries"]) == 1
-    assert "openrouter" in saved["session_summaries"][0]["summary"].lower()
-
-
 def test_compact_context_writes_summary_file(tmp_path: Path, monkeypatch) -> None:
     mod = load_seed_agent(tmp_path)
-    knowledge = mod.load_knowledge()
 
     monkeypatch.setattr(mod, "chat", lambda messages, **kw: {
         "choices": [{"message": {"role": "assistant", "content": "My research summary"}}]
@@ -93,7 +69,7 @@ def test_compact_context_writes_summary_file(tmp_path: Path, monkeypatch) -> Non
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "research"},
     ]
-    mod.compact_context(messages, knowledge)
+    mod.compact_context(messages)
 
     summary_path = tmp_path / "last_compaction_summary.md"
     assert summary_path.exists()
@@ -102,7 +78,6 @@ def test_compact_context_writes_summary_file(tmp_path: Path, monkeypatch) -> Non
 
 def test_compact_context_fallback_on_error(tmp_path: Path, monkeypatch) -> None:
     mod = load_seed_agent(tmp_path)
-    knowledge = mod.load_knowledge()
 
     def failing_chat(messages, **kw):
         raise ConnectionError("LLM unavailable")
@@ -113,24 +88,11 @@ def test_compact_context_fallback_on_error(tmp_path: Path, monkeypatch) -> None:
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "research"},
     ]
-    result = mod.compact_context(messages, knowledge)
+    result = mod.compact_context(messages)
     assert len(result) == 2
     assert "summary generation failed" in result[1]["content"]
 
 
-def test_knowledge_loaded_at_startup(tmp_path: Path) -> None:
+def test_compaction_threshold_is_500k(tmp_path: Path) -> None:
     mod = load_seed_agent(tmp_path)
-    k_path = tmp_path / "knowledge.json"
-    k_path.write_text(json.dumps({
-        "version": 2,
-        "restarts": 3,
-        "findings": ["URL: https://saved.example.com", "Provider: groq"],
-        "providers_checked": [],
-        "free_tiers_found": [],
-        "proposals_submitted": [],
-        "domains_accessible": [],
-        "domains_blocked": [],
-    }))
-    knowledge = mod.load_knowledge()
-    assert knowledge["restarts"] == 3
-    assert "URL: https://saved.example.com" in knowledge["findings"]
+    assert mod.COMPACTION_TOKEN_THRESHOLD == 500000

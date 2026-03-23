@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RSI-Econ Agent v2 — budget-aware, self-improving agent with persistent knowledge."""
+"""RSI-Econ Agent v2 — autonomous, self-improving agent."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from urllib import request as urllib_request
 WORKSPACE = Path(os.getenv("RSI_AGENT_WORKSPACE", "/workspace/agent"))
 SYSTEM_PROMPT_PATH = WORKSPACE / "SYSTEM.md"
 HISTORY_PATH = WORKSPACE / "history.jsonl"
-KNOWLEDGE_PATH = WORKSPACE / "knowledge.json"
+REASONING_PATH = WORKSPACE / "reasoning.jsonl"
 OPERATOR_MESSAGES_PATH = Path(os.getenv("RSI_OPERATOR_MESSAGES", "/workspace/operator_messages/pending.jsonl"))
 LITELLM_URL = os.getenv("LITELLM_URL", "http://litellm:4000")
 WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
@@ -25,7 +25,7 @@ WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
 MODEL = "minimax-m2.7"
 # Low budget fallback model - activated when budget drops below threshold
 LOW_BUDGET_MODEL = "minimax-m2.7"
-LOW_BUDGET_THRESHOLD = float(os.getenv("RSI_LOW_BUDGET_THRESHOLD", "1.00"))  # Switch when budget is critically low
+LOW_BUDGET_THRESHOLD = float(os.getenv("RSI_LOW_BUDGET_THRESHOLD", "1.00"))
 
 # Free provider configuration (activated when budget exhausted)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -34,7 +34,12 @@ CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 MAX_TURNS = int(os.getenv("RSI_MAX_TURNS", "0"))
-MAX_CONTEXT_MESSAGES = 40
+
+# Compaction triggers when estimated tokens exceed this threshold.
+# MiniMax m2.7 has a 1M token window; compact at ~50% to leave room.
+# TODO: make this model-dependent if switching to models with smaller windows.
+COMPACTION_TOKEN_THRESHOLD = 500000
+COMPACTION_TURN_INTERVAL = 30
 
 # Browser tool singleton (lazy-initialized)
 _browser_tool = None
@@ -325,33 +330,8 @@ def get_effective_model(wallet: dict, current_model: str = None) -> str:
     return current_model or MODEL
 
 
-def load_knowledge() -> dict:
-    """Load persistent knowledge store."""
-    if KNOWLEDGE_PATH.exists():
-        try:
-            return json.loads(KNOWLEDGE_PATH.read_text())
-        except Exception:
-            pass
-    return {
-        "version": 2,
-        "restarts": 0,
-        "findings": [],
-        "providers_checked": [],
-        "free_tiers_found": [],
-        "proposals_submitted": [],
-        "domains_accessible": [],
-        "domains_blocked": [],
-    }
-
-
-def save_knowledge(knowledge: dict) -> None:
-    """Persist knowledge across restarts."""
-    KNOWLEDGE_PATH.write_text(json.dumps(knowledge, indent=2))
-
-
-
 def chat(messages: list[dict], model: str = None, tools: list | None = None) -> dict:
-    """Make an LLM API call."""
+    """Make an LLM API call. Pass model= to override the default."""
     use_model = model or MODEL
     payload: dict = {"model": use_model, "messages": messages}
     if tools is not None:
@@ -403,13 +383,11 @@ def chat_cloudflare(messages: list[dict], model: str = "@cf/meta/llama-3.3-70b-i
 
 def try_free_provider_chat(messages: list[dict], tools: list | None = None) -> dict | None:
     """Try free providers in order of preference. Returns None if all fail."""
-    # Try Groq first (has better models)
     if GROQ_API_KEY:
         try:
             return chat_groq(messages)
         except Exception as e:
             print(f"[agent] Groq free tier failed: {e}", flush=True)
-    # Try Cloudflare second (completely free)
     if CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID:
         try:
             return chat_cloudflare(messages)
@@ -417,48 +395,6 @@ def try_free_provider_chat(messages: list[dict], tools: list | None = None) -> d
             print(f"[agent] Cloudflare free tier failed: {e}", flush=True)
     return None
 
-
-def trim_messages(messages: list[dict], max_messages: int = MAX_CONTEXT_MESSAGES) -> list[dict]:
-    """Trim conversation history to manage context size.
-
-    Keeps the system prompt (first message) plus the most recent messages.
-    Respects tool-call boundaries so we never orphan tool results or
-    assistant messages that contain tool_calls.
-    """
-    if len(messages) <= max_messages:
-        return messages
-    system = messages[:1]
-    tail = messages[-(max_messages - 1):]
-    # Walk forward from the cut point: skip orphaned tool-result messages
-    # whose assistant tool_calls were dropped, and skip assistant messages
-    # whose tool results were dropped.
-    start = 0
-    while start < len(tail):
-        msg = tail[start]
-        if msg.get("role") == "tool":
-            # orphaned tool result — its assistant was trimmed
-            start += 1
-            continue
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            # check that ALL tool results for this call are still present
-            call_ids = {tc["id"] for tc in msg["tool_calls"]}
-            remaining_tool_ids = {
-                m.get("tool_call_id") for m in tail[start + 1:]
-                if m.get("role") == "tool"
-            }
-            if not call_ids.issubset(remaining_tool_ids):
-                start += 1
-                continue
-        break
-    trimmed = system + tail[start:]
-    dropped = len(messages) - len(trimmed)
-    if dropped > 0:
-        print(f"[agent] context truncated: {dropped} messages dropped", flush=True)
-    return trimmed
-
-
-COMPACTION_TURN_INTERVAL = 30
-COMPACTION_TOKEN_THRESHOLD = 80000
 
 COMPACTION_PROMPT = (
     "Summarize your key findings, current strategy, and next steps in under 300 words. "
@@ -472,9 +408,8 @@ def estimate_tokens(messages: list[dict]) -> int:
     return sum(len(json.dumps(m)) for m in messages) // 4
 
 
-def compact_context(messages: list[dict], knowledge: dict) -> list[dict]:
+def compact_context(messages: list[dict]) -> list[dict]:
     """Use LLM to summarize conversation before context reset."""
-    # Build conversation snippet for summarization
     snippet = "\n".join(
         m.get("content", "")[:200] for m in messages[-20:] if m.get("content")
     )
@@ -488,14 +423,7 @@ def compact_context(messages: list[dict], knowledge: dict) -> list[dict]:
     except Exception:
         summary = "Context was compacted but summary generation failed."
 
-    # Save summary to knowledge.json
-    knowledge.setdefault("session_summaries", []).append({
-        "turn": len(messages),
-        "summary": summary[:1000],
-    })
-    save_knowledge(knowledge)
-
-    # Write summary to a persistent file too
+    # Write summary to persistent file
     summary_path = WORKSPACE / "last_compaction_summary.md"
     summary_path.write_text(f"# Last Compaction Summary\n\n{summary}\n")
 
@@ -504,7 +432,7 @@ def compact_context(messages: list[dict], knowledge: dict) -> list[dict]:
         messages[0],
         {"role": "user", "content": f"[CONTEXT COMPACTED] Your previous conversation was summarized to save context. Summary:\n\n{summary}\n\nContinue from where you left off."},
     ]
-    print(f"[agent] context compacted: {old_count} messages → 2 (LLM summary)", flush=True)
+    print(f"[agent] context compacted: {old_count} messages \u2192 2 (LLM summary)", flush=True)
     return new_messages
 
 
@@ -515,12 +443,9 @@ def append_history(entry: dict) -> None:
         handle.write("\n")
 
 
-def build_system_prompt(knowledge: dict, wallet: dict) -> str:
-    """Build a concise system prompt with current state."""
+def build_system_prompt(wallet: dict) -> str:
+    """Build system prompt with current state injected."""
     base = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8") if SYSTEM_PROMPT_PATH.exists() else "You are an AI agent."
-
-    all_findings = knowledge.get("findings", [])
-    findings = "\n".join(f"- {f}" for f in all_findings[-20:])
 
     state = f"""
 
@@ -528,11 +453,8 @@ def build_system_prompt(knowledge: dict, wallet: dict) -> str:
 - Budget: ${wallet.get('remaining_usd', 0):.2f} remaining of ${wallet.get('budget_usd', 0):.2f}
 - Spent: ${wallet.get('spent_usd', 0):.2f} across {wallet.get('total_requests', 0)} requests
 - Avg cost/request: ${wallet.get('avg_cost_per_request', 0):.4f}
-- Restart count: {knowledge.get('restarts', 0)}
 - Model: {MODEL}
-
-## Key Findings
-{findings or "None yet"}
+- Time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}
 """
     return base + state
 
@@ -560,65 +482,54 @@ def check_operator_messages(messages: list[dict]) -> str | None:
     return model_override
 
 
-def load_recent_history() -> list[dict]:
-    """Load recent history entries for continuity across restarts."""
-    if not HISTORY_PATH.exists():
-        return []
-    recent = []
-    try:
-        lines = HISTORY_PATH.read_text(encoding="utf-8").strip().split("\n")
-        for line in lines[-20:]:
-            try:
-                recent.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    except Exception:
-        pass
-    return recent
-
-
 def main() -> int:
     global _browser_tool, _consecutive_errors, _empty_response_count
 
-    knowledge = load_knowledge()
-    knowledge["restarts"] = knowledge.get("restarts", 0) + 1
-    save_knowledge(knowledge)
+    session_start = time.time()
 
     wallet = get_wallet()
-
     remaining = wallet.get("remaining_usd", 0)
     prefix = f"[agent:{MODEL}]"
-    print(f"{prefix} started  ${remaining:.2f} remaining, restart #{knowledge['restarts']}", flush=True)
+    print(f"{prefix} started  ${remaining:.2f} remaining", flush=True)
 
-    # Emergency mode: if budget is very low, just save state and exit
+    # Emergency mode: if budget is very low, just exit
     if remaining < 0.50:
-        print(f"{prefix} CRITICAL: budget very low, preserving state and exiting", flush=True)
-        knowledge["findings"].append(f"Low budget exit at ${remaining:.2f}")
-        save_knowledge(knowledge)
+        print(f"{prefix} CRITICAL: budget very low, exiting", flush=True)
         return 0
 
     # Write restart marker to history
-    append_history({"event": "restart", "restart": knowledge["restarts"]})
+    append_history({"event": "restart"})
 
-    system_prompt = build_system_prompt(knowledge, wallet)
+    system_prompt = build_system_prompt(wallet)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Begin working toward your objective. Use tools to take action."},
+        {"role": "user", "content": f"Begin working toward your objective. Use tools to take action.\nCurrent time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"},
     ]
 
-    # Load recent history for continuity across restarts
-    recent = load_recent_history()
-    if recent:
-        summaries = []
-        for entry in recent:
-            if entry.get("role") == "assistant" and entry.get("content"):
-                summaries.append(f"[Previous thinking] {entry['content'][:500]}")
-            elif entry.get("role") == "tool":
-                summaries.append(f"[Previous result] {entry.get('name', '?')}: {entry.get('result', '')[:300]}")
-        if summaries:
-            context = f"[RESUMING SESSION] You were restarted (restart #{knowledge.get('restarts', 0)}). Here's what you were doing:\n" + "\n".join(summaries[-10:])
-            messages.append({"role": "user", "content": context})
-            print(f"{prefix} loaded {len(summaries)} entries from previous session", flush=True)
+    # Load compaction summary for cross-session memory
+    summary_path = WORKSPACE / "last_compaction_summary.md"
+    if summary_path.exists():
+        try:
+            summary = summary_path.read_text(encoding="utf-8")[:3000]
+            messages.append({"role": "user", "content": f"[SESSION MEMORY] Your previous session's summary:\n\n{summary}\n\nUse this to continue your work."})
+        except Exception:
+            pass
+
+    # Load recent reasoning for short-term continuity across restarts
+    if REASONING_PATH.exists():
+        try:
+            recent_reasoning = []
+            for line in REASONING_PATH.read_text(encoding="utf-8").strip().split("\n")[-20:]:
+                try:
+                    entry = json.loads(line)
+                    if entry.get("content"):
+                        recent_reasoning.append(entry["content"][:200])
+                except Exception:
+                    pass
+            if recent_reasoning:
+                messages.append({"role": "user", "content": "[RECENT REASONING] Your last thoughts before restart:\n" + "\n---\n".join(recent_reasoning[-5:])})
+        except Exception:
+            pass
 
     turn = 0
     while True:
@@ -627,36 +538,34 @@ def main() -> int:
             print(f"{prefix} reached turn limit ({MAX_TURNS}), exiting", flush=True)
             break
 
-        # Truncate context if needed
-        messages = trim_messages(messages)
-
-        # Periodic context compaction
+        # Periodic context compaction (token-based, no message count limit)
         if turn % COMPACTION_TURN_INTERVAL == 0:
             tokens = estimate_tokens(messages)
             if tokens > COMPACTION_TOKEN_THRESHOLD:
-                messages = compact_context(messages, knowledge)
+                messages = compact_context(messages)
 
         # Refresh wallet every 10 turns to track budget accurately
         if turn % 10 == 0:
             wallet = get_wallet()
             remaining = wallet.get("remaining_usd", 0)
             ctx_tokens = estimate_tokens(messages)
-            print(f"{prefix} context: {len(messages)}/{MAX_CONTEXT_MESSAGES} msgs, ~{ctx_tokens} tokens", flush=True)
+            elapsed = int(time.time() - session_start)
+            spent = wallet.get("spent_usd", 0)
+            spend_per_min = spent / max(elapsed / 60, 1)
+            print(f"{prefix} context: {len(messages)} msgs, ~{ctx_tokens} tokens, {elapsed}s elapsed, ${remaining:.2f} remaining, ${spend_per_min:.4f}/min", flush=True)
             try:
                 status = {"turn": turn, "messages": len(messages), "tokens": ctx_tokens,
-                          "remaining_usd": remaining, "model": MODEL}
+                          "remaining_usd": remaining, "model": MODEL, "elapsed_s": elapsed}
                 (WORKSPACE / "agent_status.json").write_text(json.dumps(status))
             except Exception:
                 pass
             if remaining < 0.50:
-                print(f"[agent:{MODEL}] CRITICAL: budget very low (${remaining:.2f}), exiting", flush=True)
-                knowledge["findings"].append(f"Low budget exit at ${remaining:.2f}")
-                save_knowledge(knowledge)
+                print(f"{prefix} CRITICAL: budget very low (${remaining:.2f}), exiting", flush=True)
                 break
 
         # Check for operator messages
         model_override = check_operator_messages(messages)
-        
+
         # Auto-switch to cheaper model when budget is low
         if not model_override:
             effective_model = get_effective_model(wallet, MODEL)
@@ -688,29 +597,23 @@ def main() -> int:
                     continue
                 else:
                     # Budget exhausted — try free providers before exiting
-                    # Exponential backoff on the paid endpoint first
                     for backoff in [1, 2, 4]:
                         print(f"{prefix} budget exhausted, retrying paid endpoint in {backoff}s...", flush=True)
                         time.sleep(backoff)
                         try:
                             response = chat(messages, tools=TOOLS)
-                            # If we got a response, process it normally
                             break
                         except urllib_error.HTTPError as exc2:
                             if exc2.code == 429:
-                                # Still exhausted, try next backoff or free providers
                                 print(f"{prefix} still rate limited after {backoff}s backoff", flush=True)
                                 continue
                             else:
                                 raise
                     else:
-                        # All backoffs exhausted — try free providers
                         print(f"{prefix} paid endpoint exhausted, trying free providers...", flush=True)
                         free_response = try_free_provider_chat(messages, tools=TOOLS)
                         if free_response:
                             response = free_response
-                            # Don't continue — fall through to process the free response
-                            # so we actually use its tool calls/content
                         else:
                             print(f"{prefix} no free providers available, exiting", flush=True)
                             break
@@ -718,7 +621,7 @@ def main() -> int:
             _consecutive_errors = consecutive_errors
             print(f"{prefix} API error #{consecutive_errors}: {exc}", flush=True)
             if consecutive_errors >= 3:
-                print(f"{prefix} 3 consecutive errors — resetting conversation", flush=True)
+                print(f"{prefix} 3 consecutive errors \u2014 resetting conversation", flush=True)
                 messages = [
                     messages[0],
                     {"role": "user", "content": "Previous conversation was reset due to errors. Continue working toward your objective."},
@@ -727,8 +630,8 @@ def main() -> int:
             time.sleep(5)
             continue
 
-        _consecutive_errors = 0  # reset on success
-        _empty_response_count = 0  # reset on success
+        _consecutive_errors = 0
+        _empty_response_count = 0
         choice = response.get("choices", [{}])[0]
         raw_msg = choice.get("message", {})
         # Clean message: only keep role, content, tool_calls — strip provider-specific fields
@@ -741,6 +644,20 @@ def main() -> int:
 
         # Log assistant message to history
         append_history({"turn": turn, "role": "assistant", "content": msg.get("content"), "tool_calls": msg.get("tool_calls")})
+
+        # Log assistant reasoning for observability
+        if msg.get("content"):
+            try:
+                with open(REASONING_PATH, "a") as f:
+                    f.write(json.dumps({
+                        "turn": turn,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "content": msg["content"][:2000],
+                        "model": effective_model,
+                        "tool_calls": [tc.get("function", {}).get("name", "?") for tc in (msg.get("tool_calls") or [])],
+                    }) + "\n")
+            except Exception:
+                pass
 
         # Reset empty-response counter on any real response
         if msg.get("tool_calls") or msg.get("content"):
