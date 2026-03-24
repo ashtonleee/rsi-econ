@@ -21,11 +21,10 @@ OPERATOR_MESSAGES_PATH = Path(os.getenv("RSI_OPERATOR_MESSAGES", "/workspace/ope
 LITELLM_URL = os.getenv("LITELLM_URL", "http://litellm:4000")
 WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
 
-# Use mini model by default for cost efficiency
-# Force minimax-m2.7 regardless of env var to ensure cheapest operation
-MODEL = "minimax-m2.7"
-# Low budget fallback model - activated when budget drops below threshold
-LOW_BUDGET_MODEL = "minimax-m2.7"
+# Default model from env var (operator controls starting model)
+MODEL = os.getenv("RSI_MODEL", "default")
+# Low budget fallback model
+LOW_BUDGET_MODEL = os.getenv("RSI_LOW_BUDGET_MODEL", "minimax-m2.7")
 LOW_BUDGET_THRESHOLD = float(os.getenv("RSI_LOW_BUDGET_THRESHOLD", "1.00"))
 
 # Free provider configuration (activated when budget exhausted)
