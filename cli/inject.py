@@ -33,7 +33,7 @@ def main() -> int:
     with MESSAGES_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
-    print(f"Queued: {args.message[:100]}")
+    print(f"Queued: {args.message}")
     if args.model:
         print(f"Model override: {args.model}")
     return 0

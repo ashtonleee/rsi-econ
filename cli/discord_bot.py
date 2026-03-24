@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -61,6 +62,17 @@ COLOR_YELLOW = 0xF1C40F
 COLOR_ORANGE = 0xE67E22
 COLOR_BLUE = 0x3498DB
 COLOR_GRAY = 0x95A5A6
+
+# Improved summarize prompt (Fix 2)
+SUMMARIZE_PROMPT = (
+    "You are summarizing an AI agent's recent activity for its human operator. "
+    "Focus on DISCOVERIES (what new information was found), DECISIONS (what the "
+    "agent chose to do and why), PROBLEMS (errors, failures, dead ends), and "
+    "CHANGES (files created/modified, self-edits). Do NOT describe low-level "
+    "tool usage. The operator already knows the agent uses shell and browse_url. "
+    "Be specific about provider names, URLs, findings, and strategies. "
+    "3-5 sentences."
+)
 
 
 # ── Bridge HTTP helpers ──────────────────────────────────────────────
@@ -136,6 +148,19 @@ def is_sandbox_running() -> bool:
     return False
 
 
+def parse_compaction_counts(log_text: str) -> dict[str, int]:
+    """Parse agent logs for compaction events (Fix 3)."""
+    stage1 = 0
+    stage2 = 0
+    for line in log_text.split("\n"):
+        lower = line.lower()
+        if "stage 1" in lower or "mask_tool_outputs" in lower:
+            stage1 += 1
+        if "stage 2" in lower or "compact_context" in lower or "context compacted" in lower:
+            stage2 += 1
+    return {"stage1": stage1, "stage2": stage2, "total": stage1 + stage2}
+
+
 # ── Embed builders ───────────────────────────────────────────────────
 
 
@@ -167,9 +192,9 @@ def build_status_embed(wallet: dict, git_log: list, agent_status: dict) -> disco
     embed = discord.Embed(title="RSI-Econ Agent Status", color=color)
     embed.add_field(name="Status", value=status_text, inline=True)
 
-    # Model
-    models = wallet.get("models_available", [])
-    model = models[0] if models else "unknown"
+    # Model — prefer the actual running model from agent_status
+    ctx = agent_status.get("agent_status", {})
+    model = ctx.get("model") or wallet.get("models_available", ["unknown"])[0]
     embed.add_field(name="Model", value=f"`{model}`", inline=True)
 
     # Budget
@@ -190,13 +215,13 @@ def build_status_embed(wallet: dict, git_log: list, agent_status: dict) -> disco
         msgs = ctx.get("messages", "?")
         tokens = ctx.get("tokens", 0)
         turn = ctx.get("turn", "?")
-        embed.add_field(name="Context", value=f"{msgs}/40 msgs, ~{tokens // 1000}k tokens\nTurn: ~{turn}", inline=True)
-
-    # Findings
-    knowledge = agent_status.get("knowledge", {})
-    findings = len(knowledge.get("findings", []))
-    if findings:
-        embed.add_field(name="Findings", value=f"{findings} entries", inline=True)
+        ctx_window = ctx.get("context_window", 1000000)
+        ctx_pct = int(tokens / ctx_window * 100) if ctx_window else 0
+        embed.add_field(
+            name="Context",
+            value=f"{msgs} msgs, ~{tokens // 1000}K tokens ({ctx_pct}% of {ctx_window // 1000}K)\nTurn: ~{turn}",
+            inline=True,
+        )
 
     # Requests
     avg_cost = wallet.get("avg_cost_per_request", 0)
@@ -207,12 +232,62 @@ def build_status_embed(wallet: dict, git_log: list, agent_status: dict) -> disco
     return embed
 
 
-def build_summary_embed(summary: str, wallet: dict) -> discord.Embed:
+def _build_status_bar_fields(embed: discord.Embed, wallet: dict, agent_status: dict,
+                              git_log: list | None = None, compaction: dict | None = None,
+                              uptime_s: int | None = None) -> None:
+    """Add compact status bar fields to any embed (Fix 2)."""
     remaining = wallet.get("remaining_usd", 0)
     total = wallet.get("budget_usd", 0)
-    embed = discord.Embed(title="\U0001f4ca Activity Summary", description=summary, color=COLOR_BLUE)
+    total_reqs = wallet.get("total_requests", 0)
+
+    ctx = agent_status.get("agent_status", {})
+    model = ctx.get("model") or wallet.get("models_available", ["?"])[0]
+    msgs = ctx.get("messages", "?")
+    tokens = ctx.get("tokens", 0)
+    ctx_window = ctx.get("context_window", 1000000)
+    ctx_pct = int(tokens / ctx_window * 100) if ctx_window else 0
+
+    embed.add_field(name="Model", value=f"`{model}`", inline=True)
     embed.add_field(name="Budget", value=f"${remaining:.2f} / ${total:.2f}", inline=True)
-    embed.add_field(name="Requests", value=str(wallet.get("total_requests", 0)), inline=True)
+    embed.add_field(name="Requests", value=str(total_reqs), inline=True)
+    embed.add_field(
+        name="Context",
+        value=f"{msgs} msgs, {tokens // 1000}K tok ({ctx_pct}%)",
+        inline=True,
+    )
+
+    # Compaction counts
+    if compaction:
+        s1 = compaction.get("stage1", 0)
+        s2 = compaction.get("stage2", 0)
+        embed.add_field(name="Compactions", value=f"{s1 + s2} (s1:{s1} s2:{s2})", inline=True)
+    else:
+        embed.add_field(name="Compactions", value="N/A", inline=True)
+
+    # Self-edit count from git log
+    edits = 0
+    if git_log:
+        edits = max(0, len(git_log) - 1)  # minus seed commit
+    embed.add_field(name="Self-edits", value=f"{edits} commits", inline=True)
+
+    # Uptime
+    if uptime_s is not None and uptime_s > 0:
+        mins, secs = divmod(uptime_s, 60)
+        embed.add_field(name="Uptime", value=f"{mins}m {secs}s", inline=True)
+    elif ctx.get("elapsed_s"):
+        mins, secs = divmod(ctx["elapsed_s"], 60)
+        embed.add_field(name="Uptime", value=f"{mins}m {secs}s", inline=True)
+
+
+def build_summary_embed(summary: str, wallet: dict, agent_status: dict,
+                         git_log: list | None = None, compaction: dict | None = None) -> discord.Embed:
+    """Summary embed with status bar fields + LLM narrative (Fix 2)."""
+    embed = discord.Embed(
+        title="\U0001f4ca Activity Summary",
+        description=summary,
+        color=COLOR_BLUE,
+    )
+    _build_status_bar_fields(embed, wallet, agent_status, git_log=git_log, compaction=compaction)
     embed.timestamp = datetime.now(timezone.utc)
     return embed
 
@@ -251,7 +326,6 @@ def _parse_diff(diff_text: str) -> dict:
     removed = 0
     for line in diff_text.split("\n"):
         if line.startswith("diff --git"):
-            # "diff --git a/foo.py b/foo.py" → "foo.py"
             parts = line.split(" b/", 1)
             if len(parts) == 2:
                 files.append(parts[1])
@@ -270,7 +344,6 @@ def build_evolution_embed(
     file_list = ", ".join(f"`{f}`" for f in files) if files else "(unknown)"
 
     title = f"\U0001f9ec Self-Edit: {', '.join(files)}" if files else "\U0001f9ec Self-Edit"
-    # Discord embed titles max 256 chars
     if len(title) > 256:
         title = title[:253] + "..."
 
@@ -290,7 +363,6 @@ def build_evolution_embed(
         inline=True,
     )
 
-    # Collapsed raw diff at the bottom, truncated
     if diff_text:
         truncated = diff_text[:500]
         if len(diff_text) > 500:
@@ -310,6 +382,7 @@ class BotState:
         self.active_session: str = ""
         self.threads: dict[str, int] = {}
         self.approval_messages: dict[str, int] = {}
+        self.session_start_time: float = 0.0
         self._load()
 
     def _load(self) -> None:
@@ -320,6 +393,7 @@ class BotState:
                 self.active_session = data.get("active_session", "")
                 self.threads = data.get("threads", {})
                 self.approval_messages = data.get("approval_messages", {})
+                self.session_start_time = data.get("session_start_time", 0.0)
             except Exception:
                 pass
 
@@ -330,6 +404,7 @@ class BotState:
             "active_session": self.active_session,
             "threads": self.threads,
             "approval_messages": self.approval_messages,
+            "session_start_time": self.session_start_time,
         }, indent=2))
 
 
@@ -374,7 +449,6 @@ class RSIBot(discord.Client):
         existing = {ch.name: ch.id for ch in self.guild_obj.text_channels}
         for key, name in CHANNEL_NAMES.items():
             if key in self.state.channels:
-                # Verify it still exists
                 ch = self.guild_obj.get_channel(self.state.channels[key])
                 if ch:
                     continue
@@ -399,7 +473,6 @@ class RSIBot(discord.Client):
         if not ch:
             return None
 
-        # Check cached thread
         tid = self.state.threads.get(thread_key)
         if tid:
             try:
@@ -408,10 +481,15 @@ class RSIBot(discord.Client):
                     if thread.archived:
                         await thread.edit(archived=False)
                     return thread
+                # get_thread returned None — try fetch_channel for threads not in cache
+                thread = self.get_channel(tid)
+                if isinstance(thread, discord.Thread):
+                    if thread.archived:
+                        await thread.edit(archived=False)
+                    return thread
             except Exception:
                 pass
 
-        # Create new thread
         return await self._create_new_thread(channel_key, thread_key, name)
 
     async def _create_new_thread(self, channel_key: str, thread_key: str, name: str) -> discord.Thread | None:
@@ -423,10 +501,30 @@ class RSIBot(discord.Client):
             thread = await ch.create_thread(name=name, type=discord.ChannelType.public_thread)
             self.state.threads[thread_key] = thread.id
             self.state.save()
+            log.info("Created thread '%s' (%s) in #%s", name, thread.id, ch.name)
             return thread
         except Exception as exc:
             log.warning("Failed to create thread %s: %s", name, exc)
             return None
+
+    async def _close_old_thread(self, thread_key: str, channel_key: str) -> None:
+        """Post farewell and archive an old thread if it exists."""
+        old_tid = self.state.threads.get(thread_key)
+        if not old_tid:
+            return
+        try:
+            # Try bot cache first, then guild cache
+            old_thread = self.get_channel(old_tid)
+            if not old_thread:
+                ch = self._get_channel(channel_key)
+                if ch:
+                    old_thread = ch.get_thread(old_tid)
+            if isinstance(old_thread, discord.Thread) and not old_thread.archived:
+                await old_thread.send("\U0001f6d1 Session ended. New session starting.")
+                await old_thread.edit(archived=True)
+                log.info("Archived old thread %s (%s)", old_thread.name, old_tid)
+        except Exception as exc:
+            log.debug("Could not close old thread %s: %s", old_tid, exc)
 
     # ── Event polling ────────────────────────────────────────────────
 
@@ -448,7 +546,6 @@ class RSIBot(discord.Client):
                     event_file.unlink()
                 except OSError:
                     pass
-            # Rate limit: avoid Discord API throttling
             await asyncio.sleep(0.5)
 
     @event_poll_loop.before_loop
@@ -471,7 +568,7 @@ class RSIBot(discord.Client):
         elif event_type == "proposal_submitted":
             await self._handle_proposal(message, data)
         elif event_type in ("proposal_approved", "proposal_rejected"):
-            pass  # Handled by reaction callbacks
+            pass
         elif event_type == "finding":
             await self._handle_finding(message, data)
         elif event_type == "provider_proposed":
@@ -479,16 +576,18 @@ class RSIBot(discord.Client):
         elif event_type == "provider_activated":
             await self._handle_provider_activated(message)
         else:
-            # Generic alert for unknown events
             ch = self._get_channel("alerts")
             if ch:
                 embed = build_alert_embed(f"Event: {event_type}", message, COLOR_GRAY)
                 await ch.send(embed=embed)
 
+    # ── Fix 1: Always create new threads on session_start ────────────
+
     async def _handle_session_start(self, message: str, data: dict) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         session_name = data.get("session_name", ts)
         self.state.active_session = session_name
+        self.state.session_start_time = time.time()
 
         # Post to alerts
         ch = self._get_channel("alerts")
@@ -496,24 +595,16 @@ class RSIBot(discord.Client):
             embed = build_alert_embed("\U0001f7e2 Session Started", message, COLOR_GREEN)
             await ch.send(embed=embed)
 
-        # Close old threads with a farewell message
-        for thread_key, channel_key in [("activity", "activity"), ("evolution", "evolution")]:
-            old_tid = self.state.threads.get(thread_key)
-            if old_tid:
-                old_ch = self._get_channel(channel_key)
-                if old_ch:
-                    try:
-                        old_thread = old_ch.get_thread(old_tid)
-                        if old_thread and not old_thread.archived:
-                            await old_thread.send("\U0001f6d1 Session ended. New session starting.")
-                            await old_thread.edit(archived=True)
-                    except Exception:
-                        pass
+        # Close old threads (best-effort — don't fail if they're gone)
+        await self._close_old_thread("activity", "activity")
+        await self._close_old_thread("evolution", "evolution")
 
-        # Always create NEW threads (never reuse)
+        # Wipe cached thread IDs — force fresh creation
         self.state.threads.pop("activity", None)
         self.state.threads.pop("evolution", None)
+        self.state.save()
 
+        # Create brand new threads
         await self._create_new_thread(
             "activity", "activity",
             f"\U0001f9ea Session {ts}",
@@ -530,6 +621,7 @@ class RSIBot(discord.Client):
             embed = build_alert_embed("\U0001f534 Session Stopped", message, COLOR_RED)
             await ch.send(content="@here", embed=embed)
         self.state.active_session = ""
+        self.state.session_start_time = 0.0
         self.state.save()
 
     async def _handle_self_edit(self, message: str, data: dict) -> None:
@@ -540,13 +632,11 @@ class RSIBot(discord.Client):
         if not thread:
             return
 
-        # Fetch the actual diff from the bridge
         diff_text = ""
         diff_data = bridge_get("/git/diff")
         if diff_data and diff_data.get("diff"):
             diff_text = diff_data["diff"]
 
-        # Get LLM summary of the change
         llm_summary = ""
         if diff_text:
             prompt = "Summarize this code change in one sentence. What was changed and why?"
@@ -597,14 +687,11 @@ class RSIBot(discord.Client):
             await thread.send(embed=embed)
 
     async def _handle_provider_proposed(self, message: str) -> None:
-        """Post provider proposal to #approvals with signup instructions."""
         ch = self._get_channel("approvals")
         if not ch:
             return
-        # Fetch full proposal details from bridge
         providers = bridge_get("/providers")
         proposed = (providers or {}).get("proposed", [])
-        # Find the most recent pending proposal
         proposal = None
         for p in reversed(proposed):
             if p.get("status") == "pending_operator":
@@ -650,7 +737,6 @@ class RSIBot(discord.Client):
         if str(payload.emoji) not in ("\u2705", "\u274c"):
             return
 
-        # Find proposal_id from message_id
         proposal_id = None
         for pid, mid in self.state.approval_messages.items():
             if mid == payload.message_id:
@@ -680,7 +766,6 @@ class RSIBot(discord.Client):
                 await msg.edit(embed=embed)
                 log.info("Proposal %s approved by %s", proposal_id, user_name)
             else:
-                # Might already be decided
                 await ch.send(f"Could not approve proposal `{proposal_id[:8]}`: {result}", delete_after=10)
         else:
             result = bridge_post(f"/proposals/{proposal_id}/reject", {"reason": f"Rejected by {user_name}"})
@@ -691,11 +776,10 @@ class RSIBot(discord.Client):
                 await msg.edit(embed=embed)
                 log.info("Proposal %s rejected by %s", proposal_id, user_name)
 
-        # Remove from tracked messages
         self.state.approval_messages.pop(proposal_id, None)
         self.state.save()
 
-    # ── Periodic activity summary (every 5 minutes) ──────────────────
+    # ── Fix 2 & 3: Better periodic activity summaries ────────────────
 
     @tasks.loop(minutes=5)
     async def summary_loop(self) -> None:
@@ -712,9 +796,14 @@ class RSIBot(discord.Client):
         if not thread:
             return
 
-        # Gather data
-        logs = get_agent_logs(30)
+        # Gather all data
+        logs = get_agent_logs(50)
         wallet = bridge_get("/wallet") or {}
+        agent_status = bridge_get("/agent/status") or {}
+        git_log = bridge_get("/git/log") or []
+
+        # Parse compaction counts from logs (Fix 3)
+        compaction = parse_compaction_counts(logs)
 
         # Read proxy logs for domain stats
         domain_stats = ""
@@ -735,25 +824,35 @@ class RSIBot(discord.Client):
             except Exception:
                 pass
 
-        # Fetch recent reasoning from bridge
+        # Fetch recent reasoning
         reasoning_text = ""
         reasoning_data = bridge_get("/agent/reasoning?lines=5")
         if reasoning_data and reasoning_data.get("entries"):
             entries = reasoning_data["entries"]
-            # Take last 2 for the embed field
             recent = entries[-2:]
             reasoning_text = "\n---\n".join(
                 e.get("content", "")[:150] for e in recent if e.get("content")
             )
 
-        # Build summary text
-        text = f"Agent logs:\n{logs}\n\nDomains: {domain_stats}"
-        result = bridge_post("/summarize", {"text": text, "max_tokens": 150})
+        # Build summary with improved prompt (Fix 2)
+        text_parts = [f"Agent logs (last 50 lines):\n{logs}"]
+        if domain_stats:
+            text_parts.append(f"Domains visited: {domain_stats}")
+        if reasoning_text:
+            text_parts.append(f"Recent agent reasoning:\n{reasoning_text}")
+        text = "\n\n".join(text_parts)
+
+        result = bridge_post("/summarize", {
+            "text": f"{SUMMARIZE_PROMPT}\n\n{text}",
+            "max_tokens": 250,
+        })
         summary = result.get("summary", "(no summary)") if result else "(bridge unreachable)"
 
-        embed = build_summary_embed(summary, wallet)
+        # Build embed with status bar + narrative (Fix 2)
+        embed = build_summary_embed(summary, wallet, agent_status, git_log=git_log, compaction=compaction)
+
         if domain_stats:
-            embed.add_field(name="Domains", value=domain_stats, inline=False)
+            embed.add_field(name="Domains", value=domain_stats[:200], inline=False)
         if reasoning_text:
             embed.add_field(
                 name="\U0001f4ad Latest Thinking",
@@ -781,12 +880,16 @@ class RSIBot(discord.Client):
         @self.tree.command(name="summary", description="LLM-generated summary of current agent activity")
         async def cmd_summary(interaction: discord.Interaction) -> None:
             await interaction.response.defer()
-            logs = await asyncio.to_thread(get_agent_logs, 30)
+            logs = await asyncio.to_thread(get_agent_logs, 50)
             wallet = bridge_get("/wallet") or {}
-            text = f"Agent logs:\n{logs}"
-            result = bridge_post("/summarize", {"text": text, "max_tokens": 150})
+            agent_status = bridge_get("/agent/status") or {}
+            git_log = bridge_get("/git/log") or []
+            compaction = parse_compaction_counts(logs)
+
+            text = f"{SUMMARIZE_PROMPT}\n\nAgent logs:\n{logs}"
+            result = bridge_post("/summarize", {"text": text, "max_tokens": 250})
             summary = result.get("summary", "(no summary)") if result else "(bridge unreachable)"
-            embed = build_summary_embed(summary, wallet)
+            embed = build_summary_embed(summary, wallet, agent_status, git_log=git_log, compaction=compaction)
             await interaction.followup.send(embed=embed)
 
         @self.tree.command(name="inject", description="Send operator message to agent")
@@ -794,7 +897,7 @@ class RSIBot(discord.Client):
         async def cmd_inject(interaction: discord.Interaction, message: str) -> None:
             result = bridge_post("/operator/inject", {"message": message})
             if result and result.get("status") == "queued":
-                await interaction.response.send_message(f"\u2705 Message queued: '{message[:100]}'")
+                await interaction.response.send_message(f"\u2705 Message queued: '{message}'")
             else:
                 await interaction.response.send_message(f"\u274c Failed to inject: {result}")
 

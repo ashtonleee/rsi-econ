@@ -101,7 +101,7 @@ def process_event_files() -> None:
             data = event.get("data")
             sent = notify(event_type, message, data)
             if sent:
-                LOGGER.info("Sent notification: %s — %s", event_type, message[:100])
+                LOGGER.info("Sent notification: %s — %s", event_type, message)
             event_file.unlink()
         except (OSError, json.JSONDecodeError) as exc:
             LOGGER.warning("Failed to process event file %s: %s", event_file.name, exc)

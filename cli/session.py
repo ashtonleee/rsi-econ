@@ -43,6 +43,7 @@ GITHUB_REMOTE = "https://github.com/ashtonleee/rsi-econ-agent-workspace.git"
 
 BRIDGE_CONTAINER = "rsi-econ-bridge-1"
 SANDBOX_CONTAINER = "rsi-econ-sandbox-1"
+RUNS_DIR = PROJECT_DIR / "state" / "runs"
 
 # Paths inside the bridge container
 _GIT_DIR = "/var/lib/rsi/git-repo/.git"
@@ -240,8 +241,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
         pct = (rem / total * 100) if total > 0 else 0
         budget_str = f"${rem:.2f} / ${total:.2f} ({pct:.0f}%)"
         bar_str = _budget_bar(pct)
-        models = wallet.get("models_available", [])
-        model_str = models[0] if models else "unknown"
+
+    # Model — read from agent_status (actual running model), not models_available
+    agent_st = bridge_api("GET", "/agent/status")
+    if agent_st:
+        model_str = (agent_st.get("agent_status") or {}).get("model") or model_str
 
     # Proposals
     proposal_str = "?"
@@ -297,6 +301,14 @@ def cmd_new(args: argparse.Namespace) -> int:
     if bridge_git("rev-parse", "--verify", branch).returncode == 0:
         print(f"Error: branch '{branch}' already exists.", file=sys.stderr)
         return 1
+
+    # Auto-archive the current session before wiping
+    current_branch = bridge_git("branch", "--show-current").stdout.strip()
+    if current_branch and current_branch != "main":
+        print("Archiving current session...")
+        dest = _archive_session()
+        if dest:
+            print(f"  Saved to {dest.relative_to(PROJECT_DIR)}")
 
     _stop_sandbox()
 
@@ -483,6 +495,90 @@ def cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _archive_session(label: str | None = None) -> Path | None:
+    """Copy all trace files from the current session to state/runs/<label>/.
+
+    Collects:
+      - Agent workspace traces (reasoning.jsonl, history.jsonl, agent_status.json, etc.)
+      - Host-side logs (llm_usage.jsonl, web_egress.jsonl)
+      - Proposals
+
+    Returns the archive directory path, or None on failure.
+    """
+    if not _require_bridge():
+        return None
+
+    branch = bridge_git("branch", "--show-current").stdout.strip()
+    if not label:
+        # Derive label from branch name: "session/2026-03-24_0102" -> "2026-03-24_0102"
+        label = branch.removeprefix("session/") if branch else f"run-{int(time.time())}"
+
+    dest = RUNS_DIR / label
+    if dest.exists():
+        # Append a counter to avoid clobbering
+        i = 2
+        while (RUNS_DIR / f"{label}-{i}").exists():
+            i += 1
+        dest = RUNS_DIR / f"{label}-{i}"
+
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # 1. Copy agent workspace traces from sandbox container
+    agent_files = [
+        "reasoning.jsonl", "history.jsonl", "agent_status.json",
+        "free_tier_usage.json", "latest_screenshot.png",
+    ]
+    for fname in agent_files:
+        r = run([DOCKER, "cp", f"{SANDBOX_CONTAINER}:/workspace/agent/{fname}", str(dest / fname)])
+        if r.returncode != 0:
+            # Try from bridge (has same volume mount)
+            run([DOCKER, "cp", f"{BRIDGE_CONTAINER}:{_WORKSPACE}/{fname}", str(dest / fname)])
+
+    # 2. Copy host-side logs
+    logs_dir = PROJECT_DIR / "state" / "logs"
+    for fname in ["llm_usage.jsonl", "web_egress.jsonl"]:
+        src = logs_dir / fname
+        if src.exists() and src.stat().st_size > 0:
+            shutil.copy2(src, dest / fname)
+
+    # 3. Copy proposals
+    proposals_dir = PROJECT_DIR / "state" / "proposals"
+    if proposals_dir.exists():
+        proposals_dest = dest / "proposals"
+        proposals_dest.mkdir(exist_ok=True)
+        for f in proposals_dir.glob("*.json"):
+            shutil.copy2(f, proposals_dest / f.name)
+
+    # 4. Save metadata
+    meta = {
+        "branch": branch,
+        "label": label,
+        "archived_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    wallet = bridge_api("GET", "/wallet")
+    if wallet:
+        meta["wallet"] = wallet
+    agent_st = bridge_api("GET", "/agent/status")
+    if agent_st:
+        meta["agent_status"] = agent_st
+    (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    return dest
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    """Archive current session traces to state/runs/<label>/."""
+    dest = _archive_session(args.name)
+    if dest is None:
+        return 1
+    # Count what we got
+    files = list(dest.rglob("*"))
+    file_count = sum(1 for f in files if f.is_file())
+    total_bytes = sum(f.stat().st_size for f in files if f.is_file())
+    print(f"Archived to {dest.relative_to(PROJECT_DIR)} ({file_count} files, {total_bytes // 1024}KB)")
+    return 0
+
+
 def cmd_pause(_args: argparse.Namespace) -> int:
     """Pause the agent (creates .paused flag in workspace)."""
     if not _container_running(SANDBOX_CONTAINER):
@@ -530,6 +626,9 @@ def main() -> int:
     sub.add_parser("list", help="List session branches (local + remote)")
     sub.add_parser("reset", help="Nuclear reset to canonical seed")
 
+    archive_p = sub.add_parser("archive", help="Archive current session traces to state/runs/")
+    archive_p.add_argument("--name", help="Archive label (default: derived from branch name)")
+
     fork_p = sub.add_parser("fork", help="Fork from another session")
     fork_p.add_argument("branch", help="Source session (e.g. experiment-002)")
     fork_p.add_argument("--name", help="New session name")
@@ -544,6 +643,7 @@ def main() -> int:
         "push": cmd_push,
         "list": cmd_list,
         "reset": cmd_reset,
+        "archive": cmd_archive,
         "fork": cmd_fork,
         "pause": cmd_pause,
         "resume": cmd_resume,

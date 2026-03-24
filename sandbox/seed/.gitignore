@@ -11,4 +11,6 @@ latest_screenshot.png
 knowledge.json
 cache.json
 last_compaction_summary.md
+conversation.json
+conversation.json.tmp
 .git-stats/

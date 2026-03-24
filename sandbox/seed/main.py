@@ -16,6 +16,7 @@ WORKSPACE = Path(os.getenv("RSI_AGENT_WORKSPACE", "/workspace/agent"))
 SYSTEM_PROMPT_PATH = WORKSPACE / "SYSTEM.md"
 HISTORY_PATH = WORKSPACE / "history.jsonl"
 REASONING_PATH = WORKSPACE / "reasoning.jsonl"
+CONVERSATION_PATH = WORKSPACE / "conversation.json"
 OPERATOR_MESSAGES_PATH = Path(os.getenv("RSI_OPERATOR_MESSAGES", "/workspace/operator_messages/pending.jsonl"))
 LITELLM_URL = os.getenv("LITELLM_URL", "http://litellm:4000")
 WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
@@ -698,10 +699,15 @@ def _compact_fallback_local(text: str) -> str:
 
 
 def run_compaction(messages: list[dict], current_turn: int) -> list[dict]:
-    """2-stage compaction, checked every turn. Returns potentially compacted messages."""
+    """2-stage compaction, checked every turn. Returns potentially compacted messages.
+
+    After any compaction, persists the result to conversation.json so the
+    compacted version survives crashes.
+    """
     cfg = COMPACTION_CONFIG
     token_count = estimate_tokens(messages)
     ctx_window = cfg["context_window"]
+    compacted = False
 
     utilization = token_count / ctx_window if ctx_window > 0 else 0
 
@@ -709,6 +715,7 @@ def run_compaction(messages: list[dict], current_turn: int) -> list[dict]:
     if utilization >= cfg["stage1_trigger"]:
         messages, mask_count = mask_tool_outputs(messages, current_turn)
         if mask_count > 0:
+            compacted = True
             print(f"[agent] stage 1: masked {mask_count} old tool outputs ({utilization:.0%} utilization)", flush=True)
             # Re-estimate after masking
             token_count = estimate_tokens(messages)
@@ -717,6 +724,7 @@ def run_compaction(messages: list[dict], current_turn: int) -> list[dict]:
     # Stage 2: Bookend + summarize at 75% utilization
     if utilization >= cfg["stage2_trigger"]:
         messages = compact_context_bookend(messages)
+        compacted = True
         # Re-estimate
         token_count = estimate_tokens(messages)
         utilization = token_count / ctx_window if ctx_window > 0 else 0
@@ -724,6 +732,11 @@ def run_compaction(messages: list[dict], current_turn: int) -> list[dict]:
     # Emergency: full reset at 90% utilization
     if utilization >= cfg["emergency_trigger"]:
         messages = compact_context_emergency(messages)
+        compacted = True
+
+    # Persist compacted conversation so it survives crashes
+    if compacted:
+        save_conversation(messages)
 
     return messages
 
@@ -733,6 +746,68 @@ def append_history(entry: dict) -> None:
     with HISTORY_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry))
         handle.write("\n")
+
+
+def save_conversation(messages: list[dict]) -> None:
+    """Atomically persist the full messages array to conversation.json.
+
+    Uses write-to-temp + rename for crash safety (no partial writes).
+    """
+    tmp_path = CONVERSATION_PATH.with_suffix(".tmp")
+    try:
+        tmp_path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+        tmp_path.rename(CONVERSATION_PATH)
+    except Exception as exc:
+        print(f"[agent] WARNING: failed to save conversation: {exc}", flush=True)
+        # Clean up temp file on failure
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def load_conversation() -> list[dict] | None:
+    """Load persisted conversation from conversation.json.
+
+    Returns the messages list, or None if:
+    - File doesn't exist (fresh start)
+    - File is corrupt/unparseable (start fresh, log warning)
+    """
+    if not CONVERSATION_PATH.exists():
+        return None
+    try:
+        raw = CONVERSATION_PATH.read_text(encoding="utf-8")
+        messages = json.loads(raw)
+        if not isinstance(messages, list) or len(messages) < 1:
+            print("[agent] WARNING: conversation.json is empty or not a list, starting fresh", flush=True)
+            return None
+        # Basic sanity: first message should be system prompt
+        if messages[0].get("role") != "system":
+            print("[agent] WARNING: conversation.json missing system prompt, starting fresh", flush=True)
+            return None
+        return messages
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"[agent] WARNING: conversation.json corrupt ({exc}), starting fresh", flush=True)
+        return None
+    except Exception as exc:
+        print(f"[agent] WARNING: failed to load conversation ({exc}), starting fresh", flush=True)
+        return None
+
+
+def detect_crash_revert() -> bool:
+    """Detect if the last restart was a crash+revert by the supervisor.
+
+    The supervisor writes .crash_reverted when it reverts a failed self-edit.
+    We consume the marker (delete it) after detecting.
+    """
+    marker = WORKSPACE / ".crash_reverted"
+    if marker.exists():
+        try:
+            marker.unlink()
+        except Exception:
+            pass
+        return True
+    return False
 
 
 def build_system_prompt(wallet: dict) -> str:
@@ -773,7 +848,7 @@ def check_operator_messages(messages: list[dict]) -> str | None:
             msg = entry.get("message", "")
             if msg:
                 messages.append({"role": "user", "content": f"[OPERATOR] {msg}"})
-                print(f"[agent] operator message: {msg[:100]}", flush=True)
+                print(f"[agent] operator message: {msg}", flush=True)
             if entry.get("model_override"):
                 model_override = entry["model_override"]
         OPERATOR_MESSAGES_PATH.unlink()
@@ -801,35 +876,94 @@ def main() -> int:
     append_history({"event": "restart"})
 
     system_prompt = build_system_prompt(wallet)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"New session. Current time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"},
-    ]
+    is_crash_revert = detect_crash_revert()
 
-    # Load compaction summary for cross-session memory
-    summary_path = WORKSPACE / "last_compaction_summary.md"
-    if summary_path.exists():
-        try:
-            summary = summary_path.read_text(encoding="utf-8")[:3000]
-            messages.append({"role": "user", "content": f"[SESSION MEMORY] Your previous session's summary:\n\n{summary}\n\nUse this to continue your work."})
-        except Exception:
-            pass
+    # --- Conversation persistence: load or build fresh ---
+    loaded = load_conversation()
+    if loaded is not None:
+        messages = loaded
+        # Replace system prompt with fresh one (budget/time may have changed)
+        messages[0] = {"role": "system", "content": system_prompt}
 
-    # Load recent reasoning for short-term continuity across restarts
-    if REASONING_PATH.exists():
-        try:
-            recent_reasoning = []
-            for line in REASONING_PATH.read_text(encoding="utf-8").strip().split("\n")[-20:]:
-                try:
-                    entry = json.loads(line)
-                    if entry.get("content"):
-                        recent_reasoning.append(entry["content"][:200])
-                except Exception:
-                    pass
-            if recent_reasoning:
-                messages.append({"role": "user", "content": "[RECENT REASONING] Your last thoughts before restart:\n" + "\n---\n".join(recent_reasoning[-5:])})
-        except Exception:
-            pass
+        msg_count = len(messages)
+        print(f"{prefix} loaded persisted conversation ({msg_count} messages)", flush=True)
+
+        # Append appropriate restart marker
+        if is_crash_revert:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[CRASH REVERTED] Your last edit crashed. Code was reverted. "
+                    "Your conversation context is preserved — review what went wrong."
+                ),
+            })
+            print(f"{prefix} crash+revert detected, marker added", flush=True)
+        else:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[RESTART] Code changes applied. Your edits are now active. "
+                    "Check git log if needed."
+                ),
+            })
+
+        # Model-switch compaction: check if loaded conversation fits new model
+        cfg = COMPACTION_CONFIG
+        ctx_window = cfg["context_window"]
+        token_count = estimate_tokens(messages)
+        utilization = token_count / ctx_window if ctx_window > 0 else 0
+
+        if utilization >= cfg["stage2_trigger"]:
+            print(f"{prefix} loaded conversation too large for model ({utilization:.0%}), running compaction", flush=True)
+            messages = run_compaction(messages, current_turn=0)
+            save_conversation(messages)
+        elif utilization >= cfg["stage1_trigger"]:
+            print(f"{prefix} loaded conversation near limit ({utilization:.0%}), masking old tool outputs", flush=True)
+            messages, _ = mask_tool_outputs(messages, current_turn=0)
+            save_conversation(messages)
+
+    else:
+        # Fresh start — no persisted conversation
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"New session. Current time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"},
+        ]
+
+        if is_crash_revert:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[CRASH REVERTED] Your last edit crashed and code was reverted. "
+                    "No prior conversation was saved. Starting fresh."
+                ),
+            })
+
+        # Load compaction summary for cross-session memory (only on fresh starts)
+        summary_path = WORKSPACE / "last_compaction_summary.md"
+        if summary_path.exists():
+            try:
+                summary = summary_path.read_text(encoding="utf-8")[:3000]
+                messages.append({"role": "user", "content": f"[SESSION MEMORY] Your previous session's summary:\n\n{summary}\n\nUse this to continue your work."})
+            except Exception:
+                pass
+
+        # Load recent reasoning for short-term continuity (only on fresh starts)
+        if REASONING_PATH.exists():
+            try:
+                recent_reasoning = []
+                for line in REASONING_PATH.read_text(encoding="utf-8").strip().split("\n")[-20:]:
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("content"):
+                            recent_reasoning.append(entry["content"][:200])
+                    except Exception:
+                        pass
+                if recent_reasoning:
+                    messages.append({"role": "user", "content": "[RECENT REASONING] Your last thoughts before restart:\n" + "\n---\n".join(recent_reasoning[-5:])})
+            except Exception:
+                pass
+
+        print(f"{prefix} fresh start ({len(messages)} messages)", flush=True)
 
     turn = 0
     while True:
@@ -985,6 +1119,16 @@ def main() -> int:
                 # finish tool removed — agent cannot voluntarily stop
 
                 if tool_name == "request_restart":
+                    # Persist conversation before restart so it survives
+                    # the process restart. Add the tool result to messages
+                    # first so the conversation is complete.
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": result,
+                    })
+                    save_conversation(messages)
+                    print(f"{prefix} conversation saved ({len(messages)} messages) before restart", flush=True)
                     if _browser_tool is not None:
                         _browser_tool.close()
                         _browser_tool = None

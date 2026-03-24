@@ -865,7 +865,7 @@ def create_app(
         pending_path.parent.mkdir(parents=True, exist_ok=True)
         with pending_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
-        notify("operator_injection", f"Operator: {message[:100]}")
+        notify("operator_injection", f"Operator: {message}")
         return {"status": "queued"}
 
     # --- Provider hot-add endpoints ---

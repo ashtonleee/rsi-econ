@@ -96,11 +96,44 @@ def test_build_proposal_embed_has_footer() -> None:
 
 def test_build_summary_embed() -> None:
     mod = load_bot_module(Path("/tmp"))
-    wallet = {"remaining_usd": 2.0, "budget_usd": 5.0, "total_requests": 10}
-    embed = mod.build_summary_embed("Agent is browsing groq.com for free tier info.", wallet)
+    wallet = {"remaining_usd": 2.0, "budget_usd": 5.0, "total_requests": 10, "models_available": ["minimax-m2.7"]}
+    agent_status = {"agent_status": {"messages": 20, "tokens": 50000, "context_window": 1000000}}
+    embed = mod.build_summary_embed("Agent is browsing groq.com for free tier info.", wallet, agent_status)
     assert "Activity Summary" in embed.title
     assert embed.color.value == mod.COLOR_BLUE
     assert embed.description == "Agent is browsing groq.com for free tier info."
+    # Status bar fields should be present
+    field_names = [f.name for f in embed.fields]
+    assert "Model" in field_names
+    assert "Budget" in field_names
+    assert "Requests" in field_names
+    assert "Context" in field_names
+
+
+def test_build_summary_embed_with_compaction() -> None:
+    mod = load_bot_module(Path("/tmp"))
+    wallet = {"remaining_usd": 1.0, "budget_usd": 5.0, "total_requests": 50, "models_available": ["m2.7"]}
+    agent_status = {"agent_status": {"messages": 30, "tokens": 80000, "context_window": 1000000}}
+    compaction = {"stage1": 2, "stage2": 1, "total": 3}
+    embed = mod.build_summary_embed("Summary text.", wallet, agent_status, compaction=compaction)
+    field_names = [f.name for f in embed.fields]
+    assert "Compactions" in field_names
+    compaction_field = next(f for f in embed.fields if f.name == "Compactions")
+    assert "s1:2" in compaction_field.value
+    assert "s2:1" in compaction_field.value
+
+
+def test_parse_compaction_counts() -> None:
+    mod = load_bot_module(Path("/tmp"))
+    logs = (
+        "sandbox-1  | [agent] stage 1 mask: 3 tool outputs masked\n"
+        "sandbox-1  | [agent] stage 1 mask: 2 tool outputs masked\n"
+        "sandbox-1  | [agent] context compacted: 50 messages → 8\n"
+    )
+    result = mod.parse_compaction_counts(logs)
+    assert result["stage1"] == 2
+    assert result["stage2"] == 1
+    assert result["total"] == 3
 
 
 def test_build_evolution_embed() -> None:
