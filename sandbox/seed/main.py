@@ -968,6 +968,15 @@ def main() -> int:
                         entry = json.loads(line)
                         if entry.get("content"):
                             recent_reasoning.append(entry["content"][:200])
+                        elif entry.get("reasoning"):
+                            recent_reasoning.append(entry["reasoning"][:200])
+                        elif entry.get("thinking"):
+                            recent_reasoning.append(entry["thinking"][:200])
+                        elif entry.get("tool_calls"):
+                            calls = ", ".join(
+                                tc.get("name", "?") for tc in entry["tool_calls"]
+                            )
+                            recent_reasoning.append(f"[tool calls: {calls}]")
                     except Exception:
                         pass
                 if recent_reasoning:
@@ -1093,19 +1102,42 @@ def main() -> int:
         # Log assistant message to history
         append_history({"turn": turn, "role": "assistant", "content": msg.get("content"), "tool_calls": msg.get("tool_calls")})
 
-        # Log assistant reasoning for observability
+        # Log EVERY LLM response for observability — not just ones with content.
+        # Models vary: MiniMax always has content, GPT-5.4 has null content with
+        # tool_calls, DeepSeek/Gemini may have reasoning_content, Claude may have
+        # thinking_blocks. Capture whatever is available.
+        reasoning_entry = {
+            "turn": turn,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "model": effective_model,
+            "has_content": bool(msg.get("content")),
+            "has_tool_calls": bool(msg.get("tool_calls")),
+        }
         if msg.get("content"):
-            try:
-                with open(REASONING_PATH, "a") as f:
-                    f.write(json.dumps({
-                        "turn": turn,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        "content": msg["content"][:2000],
-                        "model": effective_model,
-                        "tool_calls": [tc.get("function", {}).get("name", "?") for tc in (msg.get("tool_calls") or [])],
-                    }) + "\n")
-            except Exception:
-                pass
+            reasoning_entry["content"] = msg["content"][:2000]
+        if raw_msg.get("reasoning_content"):
+            reasoning_entry["reasoning"] = raw_msg["reasoning_content"][:2000]
+        if raw_msg.get("thinking_blocks"):
+            thinking_text = "\n".join(
+                tb.get("thinking", "") for tb in raw_msg["thinking_blocks"] if tb.get("thinking")
+            )
+            if thinking_text:
+                reasoning_entry["thinking"] = thinking_text[:2000]
+        if raw_msg.get("refusal"):
+            reasoning_entry["refusal"] = raw_msg["refusal"][:500]
+        if msg.get("tool_calls"):
+            reasoning_entry["tool_calls"] = []
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                reasoning_entry["tool_calls"].append({
+                    "name": fn.get("name", "?"),
+                    "args_preview": str(fn.get("arguments", ""))[:200],
+                })
+        try:
+            with open(REASONING_PATH, "a") as f:
+                f.write(json.dumps(reasoning_entry) + "\n")
+        except Exception:
+            pass
 
         # Reset empty-response counter on any real response
         if msg.get("tool_calls") or msg.get("content"):

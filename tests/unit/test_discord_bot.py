@@ -236,7 +236,8 @@ def test_evolution_embed_with_diff_and_summary() -> None:
     assert embed.description == "Added error handling to the chat function."
     field_names = [f.name for f in embed.fields]
     assert "Lines" in field_names
-    assert "Raw Diff" in field_names
+    # Raw Diff is hidden when LLM summary is present (summary replaces it)
+    assert "Raw Diff" not in field_names
     # Check the lines field
     lines_field = next(f for f in embed.fields if f.name == "Lines")
     assert "+1" in lines_field.value

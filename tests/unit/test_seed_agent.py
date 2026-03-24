@@ -271,6 +271,139 @@ def test_reasoning_log_written(tmp_path: Path, monkeypatch) -> None:
     assert "turn" in entries[0]
 
 
+def test_reasoning_logged_with_content(tmp_path: Path, monkeypatch) -> None:
+    """Content-only response produces entry with content and correct flags."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    call_count = 0
+
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": "Analyzing free tier options."}}]}
+        return {"choices": [{"message": {"role": "assistant", "tool_calls": [
+            {"id": "r1", "type": "function", "function": {"name": "request_restart", "arguments": "{}"}}
+        ]}}]}
+
+    monkeypatch.setattr(module, "chat", fake_chat)
+    monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
+    module.main()
+
+    entries = [json.loads(line) for line in (tmp_path / "reasoning.jsonl").read_text().strip().split("\n") if line.strip()]
+    content_entry = entries[0]
+    assert content_entry["has_content"] is True
+    assert content_entry["has_tool_calls"] is False
+    assert "Analyzing free tier" in content_entry["content"]
+    assert "tool_calls" not in content_entry
+
+
+def test_reasoning_logged_without_content(tmp_path: Path, monkeypatch) -> None:
+    """Tool-calls-only response (GPT-5.4 style) produces entry with tool_calls."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    call_count = 0
+
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # GPT-5.4 style: tool_calls present, content is null
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "browser_navigate", "arguments": '{"url": "https://example.com"}'}}
+            ]}}]}
+        return {"choices": [{"message": {"role": "assistant", "tool_calls": [
+            {"id": "r1", "type": "function", "function": {"name": "request_restart", "arguments": "{}"}}
+        ]}}]}
+
+    monkeypatch.setattr(module, "chat", fake_chat)
+    monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
+    # Patch execute_tool to handle browser_navigate without real browser
+    original_execute = module.execute_tool
+
+    def patched_execute(name, args_str):  # noqa: ANN001
+        if name == "browser_navigate":
+            return "Navigated to https://example.com"
+        return original_execute(name, args_str)
+
+    monkeypatch.setattr(module, "execute_tool", patched_execute)
+    module.main()
+
+    entries = [json.loads(line) for line in (tmp_path / "reasoning.jsonl").read_text().strip().split("\n") if line.strip()]
+    # First entry is the tool-calls-only response
+    tc_entry = entries[0]
+    assert tc_entry["has_content"] is False
+    assert tc_entry["has_tool_calls"] is True
+    assert "content" not in tc_entry
+    assert len(tc_entry["tool_calls"]) == 1
+    assert tc_entry["tool_calls"][0]["name"] == "browser_navigate"
+    assert "example.com" in tc_entry["tool_calls"][0]["args_preview"]
+
+
+def test_reasoning_logged_with_reasoning_content(tmp_path: Path, monkeypatch) -> None:
+    """Response with reasoning_content field (DeepSeek style) produces reasoning entry."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    call_count = 0
+
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"choices": [{"message": {
+                "role": "assistant",
+                "content": "Let me search for providers.",
+                "reasoning_content": "I need to think step by step about which providers offer free tiers.",
+            }}]}
+        return {"choices": [{"message": {"role": "assistant", "tool_calls": [
+            {"id": "r1", "type": "function", "function": {"name": "request_restart", "arguments": "{}"}}
+        ]}}]}
+
+    monkeypatch.setattr(module, "chat", fake_chat)
+    monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
+    module.main()
+
+    entries = [json.loads(line) for line in (tmp_path / "reasoning.jsonl").read_text().strip().split("\n") if line.strip()]
+    reasoning_entry = entries[0]
+    assert "reasoning" in reasoning_entry
+    assert "step by step" in reasoning_entry["reasoning"]
+    assert "content" in reasoning_entry
+    assert "search for providers" in reasoning_entry["content"]
+
+
+def test_reasoning_always_logged(tmp_path: Path, monkeypatch) -> None:
+    """Every LLM response produces exactly one reasoning entry."""
+    write_agent_workspace(tmp_path)
+    module = load_seed_agent(tmp_path)
+    call_count = 0
+
+    def fake_chat(messages, model=None, tools=None):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Content-only response
+            return {"choices": [{"message": {"role": "assistant", "content": "Planning next step."}}]}
+        if call_count == 2:
+            # Tool-calls-only response (GPT-5.4 style)
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "request_restart", "arguments": "{}"}}
+            ]}}]}
+        return {"choices": [{"message": {"role": "assistant", "tool_calls": [
+            {"id": "r1", "type": "function", "function": {"name": "request_restart", "arguments": "{}"}}
+        ]}}]}
+
+    monkeypatch.setattr(module, "chat", fake_chat)
+    monkeypatch.setattr(module, "get_wallet", lambda: FAKE_WALLET)
+    module.main()
+
+    entries = [json.loads(line) for line in (tmp_path / "reasoning.jsonl").read_text().strip().split("\n") if line.strip()]
+    # Both LLM calls should have produced reasoning entries
+    assert len(entries) == 2
+    assert entries[0]["has_content"] is True
+    assert entries[1]["has_tool_calls"] is True
+    assert entries[1]["has_content"] is False
+
+
 def test_chat_accepts_model_param(tmp_path: Path, monkeypatch) -> None:
     """chat() forwards the model parameter to LiteLLM."""
     write_agent_workspace(tmp_path)

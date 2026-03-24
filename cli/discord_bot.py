@@ -194,7 +194,8 @@ def build_status_embed(wallet: dict, git_log: list, agent_status: dict) -> disco
 
     # Model — prefer the actual running model from agent_status
     ctx = agent_status.get("agent_status", {})
-    model = ctx.get("model") or wallet.get("models_available", ["unknown"])[0]
+    models = wallet.get("models_available", [])
+    model = ctx.get("model") or (models[0] if models else "unknown")
     embed.add_field(name="Model", value=f"`{model}`", inline=True)
 
     # Budget
@@ -582,52 +583,49 @@ class RSIBot(discord.Client):
                 embed = build_alert_embed(f"Event: {event_type}", message, COLOR_GRAY)
                 await ch.send(embed=embed)
 
-    # ── Fix 1: Always create new threads on session_start ────────────
+    # ── Session lifecycle ───────────────────────────────────────────
 
     async def _handle_session_start(self, message: str, data: dict) -> None:
+        has_threads = bool(self.state.threads.get("activity"))
+
+        if has_threads:
+            # This is a restart within an existing experiment — reuse threads
+            is_self_edit = "edit=yes" in message
+            label = "\U0001f504 Agent restarted (self-edit)" if is_self_edit else "\U0001f504 Agent restarted"
+            # Post a one-liner to the existing activity thread
+            thread = await self._get_or_create_thread(
+                "activity", "activity",
+                f"\U0001f9ea Session {self.state.active_session or 'unknown'}",
+            )
+            if thread:
+                await thread.send(label)
+            return
+
+        # No existing threads → first launch of a new experiment
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        session_name = data.get("session_name", ts)
+        self.state.active_session = ts
+        self.state.session_start_time = time.time()
 
-        # Only create new threads if this is a genuinely NEW session (not a restart)
-        is_new_session = session_name != self.state.active_session or not self.state.threads.get("activity")
-
-        self.state.active_session = session_name
-        if is_new_session:
-            self.state.session_start_time = time.time()
-
-        # Post to alerts (always — restarts are worth noting)
         ch = self._get_channel("alerts")
         if ch:
-            label = "\U0001f7e2 Session Started" if is_new_session else "\U0001f504 Agent Restarted"
-            embed = build_alert_embed(label, message, COLOR_GREEN)
+            embed = build_alert_embed("\U0001f7e2 Session Started", message, COLOR_GREEN)
             await ch.send(embed=embed)
 
-        if is_new_session:
-            # Close old threads (best-effort)
-            await self._close_old_thread("activity", "activity")
-            await self._close_old_thread("evolution", "evolution")
-
-            # Wipe cached thread IDs — force fresh creation
-            self.state.threads.pop("activity", None)
-            self.state.threads.pop("evolution", None)
-            self.state.save()
-
-            # Create brand new threads
-            await self._create_new_thread(
-                "activity", "activity",
-                f"\U0001f9ea Session {ts}",
-            )
-            await self._create_new_thread(
-                "evolution", "evolution",
-                f"\U0001f9ec Evolution {ts}",
-            )
-            self.state.save()
+        await self._create_new_thread("activity", "activity", f"\U0001f9ea Session {ts}")
+        await self._create_new_thread("evolution", "evolution", f"\U0001f9ec Evolution {ts}")
+        self.state.save()
 
     async def _handle_session_stop(self, message: str, data: dict) -> None:
         ch = self._get_channel("alerts")
         if ch:
             embed = build_alert_embed("\U0001f534 Session Stopped", message, COLOR_RED)
             await ch.send(content="@here", embed=embed)
+
+        # Archive threads and clear IDs so next session_start creates fresh ones
+        await self._close_old_thread("activity", "activity")
+        await self._close_old_thread("evolution", "evolution")
+        self.state.threads.pop("activity", None)
+        self.state.threads.pop("evolution", None)
         self.state.active_session = ""
         self.state.session_start_time = 0.0
         self.state.save()
@@ -832,15 +830,30 @@ class RSIBot(discord.Client):
             except Exception:
                 pass
 
-        # Fetch recent reasoning
+        # Fetch recent reasoning (handle all entry types: content, reasoning,
+        # thinking blocks, tool-calls-only, refusals)
         reasoning_text = ""
         reasoning_data = bridge_get("/agent/reasoning?lines=5")
         if reasoning_data and reasoning_data.get("entries"):
             entries = reasoning_data["entries"]
             recent = entries[-2:]
-            reasoning_text = "\n---\n".join(
-                e.get("content", "")[:150] for e in recent if e.get("content")
-            )
+            parts = []
+            for e in recent:
+                if e.get("content"):
+                    parts.append(e["content"][:150])
+                elif e.get("reasoning"):
+                    parts.append(e["reasoning"][:150])
+                elif e.get("thinking"):
+                    parts.append(e["thinking"][:150])
+                elif e.get("tool_calls"):
+                    calls = ", ".join(
+                        f"{tc.get('name', '?')}({tc.get('args_preview', '')[:50]})"
+                        for tc in e["tool_calls"]
+                    )
+                    parts.append(f"\u2192 {calls}")
+                elif e.get("refusal"):
+                    parts.append(f"[refused: {e['refusal'][:100]}]")
+            reasoning_text = "\n---\n".join(parts)
 
         # Build summary with improved prompt (Fix 2)
         text_parts = [f"Agent logs (last 50 lines):\n{logs}"]
