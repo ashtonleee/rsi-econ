@@ -1067,8 +1067,8 @@ def create_app(
     @app.post("/summarize")
     def summarize(payload: dict[str, Any]) -> dict[str, Any]:
         """LLM-powered summary of agent activity. Cost tracked separately from agent budget."""
-        text = str(payload.get("text", ""))[:4000]
-        max_tokens = int(payload.get("max_tokens", 150))
+        text = str(payload.get("text", ""))[:20000]
+        max_tokens = int(payload.get("max_tokens", 800))
         if not text.strip():
             return {"summary": "(no content to summarize)"}
         body = json.dumps({
@@ -1099,6 +1099,59 @@ def create_app(
             return {"summary": summary}
         except Exception as exc:
             return {"summary": f"(summarization failed: {exc})"}
+
+    # Model for /compact: configurable via COMPACT_MODEL env var.
+    # Set to a Gemini Flash model ID in LiteLLM when a key is available.
+    _compact_model = os.getenv("COMPACT_MODEL", "default")
+
+    @app.post("/compact")
+    def compact(payload: dict[str, Any]) -> dict[str, Any]:
+        """LLM-powered context compaction for agent sessions.
+
+        Accepts full conversation text (no artificial input cap) and returns
+        a thorough summary preserving key details. Uses a dedicated model
+        (configurable via COMPACT_MODEL env var, defaults to primary model).
+        Cost tracked separately from agent budget.
+        """
+        text = str(payload.get("text", ""))
+        max_tokens = min(int(payload.get("max_tokens", 4000)), 4000)
+        if not text.strip():
+            return {"summary": "(no content to compact)"}
+        body = json.dumps({
+            "model": _compact_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are compacting an AI agent's conversation context. "
+                        "The agent will lose all messages except this summary. "
+                        "Be thorough and preserve:\n"
+                        "- Key findings, decisions, and conclusions reached\n"
+                        "- Current strategy and active approach\n"
+                        "- Specific names, file paths, URLs, and technical details\n"
+                        "- What worked and what failed (with specifics)\n"
+                        "- Unresolved issues and open questions\n"
+                        "- Clear next steps the agent should take\n\n"
+                        "Write in a structured format the agent can act on immediately."
+                    ),
+                },
+                {"role": "user", "content": f"Compact this agent session:\n\n{text}"},
+            ],
+            "max_tokens": max_tokens,
+        }).encode("utf-8")
+        try:
+            req = urllib_request.Request(
+                f"{app.state.litellm_base_url}/v1/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib_request.urlopen(req, timeout=60) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            summary = result["choices"][0]["message"]["content"]
+            return {"summary": summary}
+        except Exception as exc:
+            return {"summary": f"(compaction failed: {exc})"}
 
     @app.get("/agent/screenshot")
     def agent_screenshot() -> Response:

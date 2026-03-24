@@ -108,9 +108,9 @@ def test_summarize_truncates_input(tmp_path: Path) -> None:
             resp = client.post("/summarize", json={"text": long_text})
 
     assert resp.status_code == 200
-    # The user message should be truncated to 4000 chars
+    # The user message should be truncated to 20000 chars
     user_msg = captured_body["data"]["messages"][1]["content"]
-    assert len(user_msg) <= 4000
+    assert len(user_msg) <= 20000
 
 
 def test_summarize_separate_budget(tmp_path: Path) -> None:

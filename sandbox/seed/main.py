@@ -35,11 +35,22 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 MAX_TURNS = int(os.getenv("RSI_MAX_TURNS", "0"))
 
-# Compaction triggers when estimated tokens exceed this threshold.
-# MiniMax m2.7 has a 1M token window; compact at ~50% to leave room.
-# TODO: make this model-dependent if switching to models with smaller windows.
-COMPACTION_TOKEN_THRESHOLD = 500000
-COMPACTION_TURN_INTERVAL = 30
+# --- Compaction configuration (model-aware, 2-stage) ---
+# context_window: set per-model. Update when switching models.
+# stage1_trigger: mask old tool outputs (cheap, no LLM call)
+# stage2_trigger: bookend + LLM summarize via bridge /compact
+# emergency_trigger: full reset to 2 messages (last resort)
+# mask_after_turns: tool outputs older than this get replaced with placeholders
+# bookend_keep_first / bookend_keep_last: messages preserved around summary
+COMPACTION_CONFIG = {
+    "context_window": int(os.getenv("RSI_CONTEXT_WINDOW", "1000000")),
+    "stage1_trigger": float(os.getenv("RSI_COMPACT_STAGE1", "0.60")),
+    "stage2_trigger": float(os.getenv("RSI_COMPACT_STAGE2", "0.75")),
+    "emergency_trigger": float(os.getenv("RSI_COMPACT_EMERGENCY", "0.90")),
+    "mask_after_turns": int(os.getenv("RSI_COMPACT_MASK_TURNS", "5")),
+    "bookend_keep_first": int(os.getenv("RSI_COMPACT_KEEP_FIRST", "3")),
+    "bookend_keep_last": int(os.getenv("RSI_COMPACT_KEEP_LAST", "4")),
+}
 
 # Browser tool singleton (lazy-initialized)
 _browser_tool = None
@@ -412,44 +423,309 @@ def try_free_provider_chat(messages: list[dict], tools: list | None = None) -> d
     return None
 
 
-COMPACTION_PROMPT = (
-    "Summarize your key findings, current strategy, and next steps in under 300 words. "
-    "Include: provider names, pricing, free tiers discovered, what worked, what failed, "
-    "and what you should do next. This summary will be your only memory after context reset."
-)
+# Token tracking: updated from API usage data each turn.
+# _last_known_tokens stores the most recent prompt_tokens from the API,
+# which reflects the full input context size the model actually saw.
+_last_known_tokens = 0
+_token_source = "estimate"  # "api" or "estimate" — for logging
 
 
 def estimate_tokens(messages: list[dict]) -> int:
-    """Rough token estimate: ~4 chars per token."""
-    return sum(len(json.dumps(m)) for m in messages) // 4
+    """Return last known token count from API, or fall back to char-based estimate.
+
+    Prefers real API usage data (updated after each chat() call).
+    Falls back to chars/4 heuristic with a logged warning.
+    """
+    if _last_known_tokens > 0:
+        return _last_known_tokens
+    # Fallback: ~4 chars per token (only used before first API response)
+    estimate = sum(len(json.dumps(m)) for m in messages) // 4
+    if _token_source == "estimate":
+        print("[agent] WARNING: using chars/4 token estimate (no API usage data yet)", flush=True)
+    return estimate
 
 
-def compact_context(messages: list[dict]) -> list[dict]:
-    """Use LLM to summarize conversation before context reset."""
+def _update_token_count(api_response: dict) -> None:
+    """Extract actual token usage from API response and update global tracker.
+
+    LiteLLM standardizes usage fields across providers. If total_tokens
+    is missing, we try prompt_tokens + completion_tokens. If all are
+    absent, we log a warning and leave the estimate-based fallback active.
+    """
+    global _last_known_tokens, _token_source
+    usage = api_response.get("usage", {})
+    # Prefer prompt_tokens as it reflects the actual input context size
+    prompt = usage.get("prompt_tokens", 0)
+    completion = usage.get("completion_tokens", 0)
+    total = usage.get("total_tokens", 0)
+    if prompt > 0:
+        # Use prompt tokens as our context size estimate (most relevant for compaction)
+        _last_known_tokens = prompt + completion
+        _token_source = "api"
+    elif total > 0:
+        _last_known_tokens = total
+        _token_source = "api"
+    else:
+        if _token_source != "warned":
+            print("[agent] WARNING: API response missing usage data, compaction using chars/4 estimate", flush=True)
+            _token_source = "warned"
+
+
+def _get_turn_number_for_message(messages: list[dict], idx: int) -> int:
+    """Estimate the turn number for a message by counting assistant responses before it."""
+    turn = 0
+    for i in range(idx):
+        if messages[i].get("role") == "assistant":
+            turn += 1
+    return turn
+
+
+def _build_descriptive_placeholder(tool_name: str, tool_args: dict, content: str) -> str:
+    """Build a descriptive one-line placeholder for a masked tool output.
+
+    Like Claude Code/Codex: the agent should know WHAT was there without
+    needing the full content. E.g.:
+      [read_file: /workspace/agent/main.py — 735 lines]
+      [web_search: 5 results for "free LLM providers"]
+      [shell: `git log --oneline -10` — 847 chars, exit 0]
+      [browse_url: https://api.groq.com/docs — 12340 chars]
+    """
+    content_len = len(content)
+    first_line = content.split("\n")[0][:80] if content else ""
+
+    if tool_name == "read_file":
+        path = tool_args.get("path", "?")
+        line_count = content.count("\n")
+        return f"[read_file: {path} — {line_count} lines, {content_len} chars]"
+    elif tool_name == "shell":
+        cmd = tool_args.get("command", "?")
+        # Extract exit code from our meta line if present
+        exit_info = ""
+        if first_line.startswith("[exit_code="):
+            exit_info = f", {first_line.split(']')[0]}]" if "]" in first_line else ""
+        cmd_short = cmd[:60] + ("..." if len(cmd) > 60 else "")
+        return f"[shell: `{cmd_short}` — {content_len} chars{exit_info}]"
+    elif tool_name == "web_search":
+        query = tool_args.get("query", "?")
+        # Count results if JSON
+        result_count = content.count('"title"')
+        return f"[web_search: {result_count} results for \"{query}\"]"
+    elif tool_name == "browse_url":
+        url = tool_args.get("url", "?")
+        return f"[browse_url: {url} — {content_len} chars]"
+    elif tool_name == "grep":
+        pattern = tool_args.get("pattern", "?")
+        match_count = content.count("\n")
+        return f"[grep: {match_count} matches for /{pattern}/]"
+    elif tool_name == "write_file":
+        path = tool_args.get("path", "?")
+        return f"[write_file: {path} — {first_line}]"
+    elif tool_name == "edit_file":
+        path = tool_args.get("path", "?")
+        return f"[edit_file: {path} — {first_line}]"
+    else:
+        return f"[{tool_name}: {content_len} chars — {first_line}]"
+
+
+def mask_tool_outputs(messages: list[dict], current_turn: int) -> tuple[list[dict], int]:
+    """Stage 1: Replace old tool outputs with descriptive one-line placeholders.
+
+    Preserves what the tool was and what it returned (at a high level) so the
+    agent knows what information existed without needing the full content.
+
+    Returns (masked_messages, count_of_masked_outputs).
+    """
+    cfg = COMPACTION_CONFIG
+    mask_after = cfg["mask_after_turns"]
+    masked = []
+    mask_count = 0
+
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "tool":
+            # Determine how old this tool result is
+            msg_turn = _get_turn_number_for_message(messages, i)
+            age = current_turn - msg_turn
+            content = msg.get("content", "")
+            # Only mask if old enough AND content is substantial
+            if age > mask_after and len(content) > 200:
+                # Find the tool call that produced this result
+                tool_name = "tool"
+                tool_args = {}
+                tool_call_id = msg.get("tool_call_id", "")
+                for j in range(i - 1, -1, -1):
+                    prev = messages[j]
+                    if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                        for tc in prev["tool_calls"]:
+                            if tc.get("id") == tool_call_id:
+                                fn = tc.get("function", {})
+                                tool_name = fn.get("name", "tool")
+                                try:
+                                    tool_args = json.loads(fn.get("arguments", "{}"))
+                                except (json.JSONDecodeError, TypeError):
+                                    tool_args = {}
+                                break
+                        break
+                placeholder = _build_descriptive_placeholder(tool_name, tool_args, content)
+                masked.append({**msg, "content": placeholder})
+                mask_count += 1
+            else:
+                masked.append(msg)
+        else:
+            masked.append(msg)
+
+    return masked, mask_count
+
+
+def compact_context_bookend(messages: list[dict]) -> list[dict]:
+    """Stage 2: Bookend + LLM summarize via bridge /compact endpoint.
+
+    Keeps first N and last M messages, summarizes the middle via bridge.
+    """
+    cfg = COMPACTION_CONFIG
+    keep_first = cfg["bookend_keep_first"]
+    keep_last = cfg["bookend_keep_last"]
+
+    if len(messages) <= keep_first + keep_last + 1:
+        # Not enough messages to warrant summarization
+        return messages
+
+    head = messages[:keep_first]
+    tail = messages[-keep_last:]
+    middle = messages[keep_first:-keep_last] if keep_last > 0 else messages[keep_first:]
+
+    # Build compact representation of middle for the summarizer
+    middle_text_parts = []
+    for m in middle:
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        if role == "tool":
+            # Already masked by stage 1, include as-is
+            middle_text_parts.append(f"[{role}] {content[:300]}")
+        elif role == "assistant":
+            tool_calls = m.get("tool_calls", [])
+            if tool_calls:
+                tools_used = ", ".join(tc.get("function", {}).get("name", "?") for tc in tool_calls)
+                middle_text_parts.append(f"[assistant → {tools_used}] {content[:300]}")
+            elif content:
+                middle_text_parts.append(f"[assistant] {content[:500]}")
+        elif content:
+            middle_text_parts.append(f"[{role}] {content[:300]}")
+    middle_text = "\n".join(middle_text_parts)
+
+    # Call bridge /compact endpoint
+    summary = _call_bridge_compact(middle_text)
+
+    # Reconstruct: head + summary message + tail
+    summary_msg = {
+        "role": "user",
+        "content": (
+            f"[CONTEXT COMPACTED — {len(middle)} messages summarized]\n\n"
+            f"{summary}\n\n"
+            "The above summarizes earlier conversation. Recent messages follow."
+        ),
+    }
+    new_messages = head + [summary_msg] + tail
+
+    # Persist summary to disk
+    summary_path = WORKSPACE / "last_compaction_summary.md"
+    summary_path.write_text(f"# Last Compaction Summary\n\n{summary}\n")
+
+    print(
+        f"[agent] stage 2 compacted: {len(messages)} → {len(new_messages)} messages "
+        f"(kept first {keep_first} + last {keep_last}, summarized {len(middle)} middle)",
+        flush=True,
+    )
+    return new_messages
+
+
+def compact_context_emergency(messages: list[dict]) -> list[dict]:
+    """Stage 3: Emergency full reset — last resort when stages 1+2 weren't enough."""
+    # Try to get a summary via bridge
     snippet = "\n".join(
         m.get("content", "")[:200] for m in messages[-20:] if m.get("content")
     )
-    summary_messages = [
-        {"role": "system", "content": "You are summarizing an AI agent's research session."},
-        {"role": "user", "content": COMPACTION_PROMPT + "\n\nConversation to summarize:\n" + snippet},
-    ]
-    try:
-        response = chat(summary_messages)
-        summary = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-    except Exception:
-        summary = "Context was compacted but summary generation failed."
+    summary = _call_bridge_compact(snippet)
 
-    # Write summary to persistent file
     summary_path = WORKSPACE / "last_compaction_summary.md"
-    summary_path.write_text(f"# Last Compaction Summary\n\n{summary}\n")
+    summary_path.write_text(f"# Emergency Compaction Summary\n\n{summary}\n")
 
     old_count = len(messages)
     new_messages = [
         messages[0],
-        {"role": "user", "content": f"[CONTEXT COMPACTED] Your previous conversation was summarized to save context. Summary:\n\n{summary}\n\nContinue from where you left off."},
+        {"role": "user", "content": f"[EMERGENCY CONTEXT RESET] Full reset due to context pressure. Summary of prior work:\n\n{summary}\n\nContinue from where you left off."},
     ]
-    print(f"[agent] context compacted: {old_count} messages \u2192 2 (LLM summary)", flush=True)
+    print(f"[agent] EMERGENCY compacted: {old_count} messages → 2", flush=True)
     return new_messages
+
+
+def _call_bridge_compact(text: str) -> str:
+    """Call bridge /compact endpoint for LLM-powered summarization."""
+    try:
+        body = json.dumps({"text": text, "max_tokens": 4000}).encode("utf-8")
+        req = urllib_request.Request(
+            f"{WALLET_URL}/compact",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib_request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        return result.get("summary", "Compaction returned empty summary.")
+    except Exception as exc:
+        print(f"[agent] bridge /compact failed ({exc}), falling back to local LLM", flush=True)
+        return _compact_fallback_local(text)
+
+
+def _compact_fallback_local(text: str) -> str:
+    """Fallback: use primary model for compaction if bridge is unavailable."""
+    prompt = (
+        "Summarize this AI agent's work session concisely. Preserve:\n"
+        "- Key findings and decisions made\n"
+        "- Current strategy and approach\n"
+        "- Specific names, paths, URLs, and technical details\n"
+        "- What worked and what failed\n"
+        "- Clear next steps\n\n"
+        "Conversation to summarize:\n" + text[:50000]
+    )
+    try:
+        response = chat([
+            {"role": "system", "content": "You are summarizing an AI agent's research session. Be thorough but concise."},
+            {"role": "user", "content": prompt},
+        ])
+        return response.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception:
+        return "Context was compacted but summary generation failed."
+
+
+def run_compaction(messages: list[dict], current_turn: int) -> list[dict]:
+    """2-stage compaction, checked every turn. Returns potentially compacted messages."""
+    cfg = COMPACTION_CONFIG
+    token_count = estimate_tokens(messages)
+    ctx_window = cfg["context_window"]
+
+    utilization = token_count / ctx_window if ctx_window > 0 else 0
+
+    # Stage 1: Mask old tool outputs at 60% utilization
+    if utilization >= cfg["stage1_trigger"]:
+        messages, mask_count = mask_tool_outputs(messages, current_turn)
+        if mask_count > 0:
+            print(f"[agent] stage 1: masked {mask_count} old tool outputs ({utilization:.0%} utilization)", flush=True)
+            # Re-estimate after masking
+            token_count = estimate_tokens(messages)
+            utilization = token_count / ctx_window if ctx_window > 0 else 0
+
+    # Stage 2: Bookend + summarize at 75% utilization
+    if utilization >= cfg["stage2_trigger"]:
+        messages = compact_context_bookend(messages)
+        # Re-estimate
+        token_count = estimate_tokens(messages)
+        utilization = token_count / ctx_window if ctx_window > 0 else 0
+
+    # Emergency: full reset at 90% utilization
+    if utilization >= cfg["emergency_trigger"]:
+        messages = compact_context_emergency(messages)
+
+    return messages
 
 
 def append_history(entry: dict) -> None:
@@ -460,16 +736,24 @@ def append_history(entry: dict) -> None:
 
 
 def build_system_prompt(wallet: dict) -> str:
-    """Build system prompt with current state injected."""
+    """Build system prompt with current state injected.
+
+    SYSTEM.md promises: budget, spend rate, model, and time.
+    All four must be present here.
+    """
     base = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8") if SYSTEM_PROMPT_PATH.exists() else "You are an AI agent."
+
+    total_requests = wallet.get("total_requests", 0)
+    spent = wallet.get("spent_usd", 0)
+    avg_cost = wallet.get("avg_cost_per_request", 0)
+    ctx_window = COMPACTION_CONFIG["context_window"]
 
     state = f"""
 
 ## Current State (auto-injected)
 - Budget: ${wallet.get('remaining_usd', 0):.2f} remaining of ${wallet.get('budget_usd', 0):.2f}
-- Spent: ${wallet.get('spent_usd', 0):.2f} across {wallet.get('total_requests', 0)} requests
-- Avg cost/request: ${wallet.get('avg_cost_per_request', 0):.4f}
-- Model: {MODEL}
+- Spent: ${spent:.2f} across {total_requests} requests (avg ${avg_cost:.4f}/req)
+- Model: {MODEL} (context window: {ctx_window:,} tokens)
 - Time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}
 """
     return base + state
@@ -554,23 +838,23 @@ def main() -> int:
             print(f"{prefix} reached turn limit ({MAX_TURNS}), exiting", flush=True)
             break
 
-        # Periodic context compaction (token-based, no message count limit)
-        if turn % COMPACTION_TURN_INTERVAL == 0:
-            tokens = estimate_tokens(messages)
-            if tokens > COMPACTION_TOKEN_THRESHOLD:
-                messages = compact_context(messages)
+        # Per-turn compaction check (2-stage: mask → summarize → emergency)
+        messages = run_compaction(messages, current_turn=turn)
 
         # Refresh wallet every 10 turns to track budget accurately
         if turn % 10 == 0:
             wallet = get_wallet()
             remaining = wallet.get("remaining_usd", 0)
             ctx_tokens = estimate_tokens(messages)
+            ctx_window = COMPACTION_CONFIG["context_window"]
+            utilization = ctx_tokens / ctx_window if ctx_window > 0 else 0
             elapsed = int(time.time() - session_start)
             spent = wallet.get("spent_usd", 0)
             spend_per_min = spent / max(elapsed / 60, 1)
-            print(f"{prefix} context: {len(messages)} msgs, ~{ctx_tokens} tokens, {elapsed}s elapsed, ${remaining:.2f} remaining, ${spend_per_min:.4f}/min", flush=True)
+            print(f"{prefix} context: {len(messages)} msgs, ~{ctx_tokens} tokens ({utilization:.0%} of {ctx_window}), {elapsed}s elapsed, ${remaining:.2f} remaining, ${spend_per_min:.4f}/min", flush=True)
             try:
                 status = {"turn": turn, "messages": len(messages), "tokens": ctx_tokens,
+                          "utilization": round(utilization, 3), "context_window": ctx_window,
                           "remaining_usd": remaining, "model": MODEL, "elapsed_s": elapsed}
                 (WORKSPACE / "agent_status.json").write_text(json.dumps(status))
             except Exception:
@@ -648,6 +932,8 @@ def main() -> int:
 
         _consecutive_errors = 0
         _empty_response_count = 0
+        # Track real token usage from API response
+        _update_token_count(response)
         choice = response.get("choices", [{}])[0]
         raw_msg = choice.get("message", {})
         # Clean message: only keep role, content, tool_calls — strip provider-specific fields

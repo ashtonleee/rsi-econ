@@ -295,11 +295,13 @@ def test_no_message_count_limit(tmp_path: Path) -> None:
     assert not hasattr(module, "trim_messages")
 
 
-def test_compaction_at_token_threshold(tmp_path: Path) -> None:
-    """Compaction threshold should be 500k tokens."""
+def test_compaction_config_exists(tmp_path: Path) -> None:
+    """Compaction config should have model-aware thresholds."""
     write_agent_workspace(tmp_path)
     module = load_seed_agent(tmp_path)
-    assert module.COMPACTION_TOKEN_THRESHOLD == 500000
+    cfg = module.COMPACTION_CONFIG
+    assert cfg["context_window"] > 0
+    assert 0 < cfg["stage1_trigger"] < cfg["stage2_trigger"] < cfg["emergency_trigger"] <= 1.0
 
 
 def test_time_in_context_log(tmp_path: Path, monkeypatch, capsys) -> None:
