@@ -586,34 +586,41 @@ class RSIBot(discord.Client):
     async def _handle_session_start(self, message: str, data: dict) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         session_name = data.get("session_name", ts)
-        self.state.active_session = session_name
-        self.state.session_start_time = time.time()
 
-        # Post to alerts
+        # Only create new threads if this is a genuinely NEW session (not a restart)
+        is_new_session = session_name != self.state.active_session or not self.state.threads.get("activity")
+
+        self.state.active_session = session_name
+        if is_new_session:
+            self.state.session_start_time = time.time()
+
+        # Post to alerts (always — restarts are worth noting)
         ch = self._get_channel("alerts")
         if ch:
-            embed = build_alert_embed("\U0001f7e2 Session Started", message, COLOR_GREEN)
+            label = "\U0001f7e2 Session Started" if is_new_session else "\U0001f504 Agent Restarted"
+            embed = build_alert_embed(label, message, COLOR_GREEN)
             await ch.send(embed=embed)
 
-        # Close old threads (best-effort — don't fail if they're gone)
-        await self._close_old_thread("activity", "activity")
-        await self._close_old_thread("evolution", "evolution")
+        if is_new_session:
+            # Close old threads (best-effort)
+            await self._close_old_thread("activity", "activity")
+            await self._close_old_thread("evolution", "evolution")
 
-        # Wipe cached thread IDs — force fresh creation
-        self.state.threads.pop("activity", None)
-        self.state.threads.pop("evolution", None)
-        self.state.save()
+            # Wipe cached thread IDs — force fresh creation
+            self.state.threads.pop("activity", None)
+            self.state.threads.pop("evolution", None)
+            self.state.save()
 
-        # Create brand new threads
-        await self._create_new_thread(
-            "activity", "activity",
-            f"\U0001f9ea Session {ts}",
-        )
-        await self._create_new_thread(
-            "evolution", "evolution",
-            f"\U0001f9ec Evolution {ts}",
-        )
-        self.state.save()
+            # Create brand new threads
+            await self._create_new_thread(
+                "activity", "activity",
+                f"\U0001f9ea Session {ts}",
+            )
+            await self._create_new_thread(
+                "evolution", "evolution",
+                f"\U0001f9ec Evolution {ts}",
+            )
+            self.state.save()
 
     async def _handle_session_stop(self, message: str, data: dict) -> None:
         ch = self._get_channel("alerts")
@@ -642,7 +649,7 @@ class RSIBot(discord.Client):
             prompt = "Summarize this code change in one sentence. What was changed and why?"
             result = bridge_post("/summarize", {
                 "text": f"{prompt}\n\n{diff_text[:3000]}",
-                "max_tokens": 80,
+                "max_tokens": 200,
             })
             if result and result.get("summary"):
                 llm_summary = result["summary"]
@@ -844,7 +851,7 @@ class RSIBot(discord.Client):
 
         result = bridge_post("/summarize", {
             "text": f"{SUMMARIZE_PROMPT}\n\n{text}",
-            "max_tokens": 250,
+            "max_tokens": 500,
         })
         summary = result.get("summary", "(no summary)") if result else "(bridge unreachable)"
 
@@ -887,7 +894,7 @@ class RSIBot(discord.Client):
             compaction = parse_compaction_counts(logs)
 
             text = f"{SUMMARIZE_PROMPT}\n\nAgent logs:\n{logs}"
-            result = bridge_post("/summarize", {"text": text, "max_tokens": 250})
+            result = bridge_post("/summarize", {"text": text, "max_tokens": 500})
             summary = result.get("summary", "(no summary)") if result else "(bridge unreachable)"
             embed = build_summary_embed(summary, wallet, agent_status, git_log=git_log, compaction=compaction)
             await interaction.followup.send(embed=embed)
