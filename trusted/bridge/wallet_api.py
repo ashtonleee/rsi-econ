@@ -243,6 +243,7 @@ class SpendTracker:
         remaining_usd = max(budget_usd - spent_usd, 0.0)
         remaining_ratio = 0.0 if budget_usd <= 0 else remaining_usd / budget_usd
         avg_cost = spent_usd / request_count if request_count else 0.0
+        estimated_turns = int(remaining_usd / avg_cost) if avg_cost > 0 else 0
         return {
             "budget_usd": round(budget_usd, 6),
             "spent_usd": round(spent_usd, 6),
@@ -251,6 +252,7 @@ class SpendTracker:
             "total_tokens": total_tokens,
             "total_requests": request_count,
             "avg_cost_per_request": round(avg_cost, 6),
+            "estimated_turns_remaining": estimated_turns,
             "models_available": self.models_available(),
             "note": "Budget is managed by trusted infrastructure. You cannot modify it.",
         }
