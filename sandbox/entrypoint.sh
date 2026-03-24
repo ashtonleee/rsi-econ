@@ -15,6 +15,10 @@ if [ ! -f /usr/local/share/ca-certificates/rsi-egress.crt ]; then
     echo "[entrypoint] WARNING: no proxy CA cert found" >&2
 fi
 
+# Git config for any local git operations (agent might use git directly)
+git config --global user.email "agent@rsi-sandbox" 2>/dev/null
+git config --global user.name "rsi-agent" 2>/dev/null
+
 # Git repo is managed by the bridge — no git init/clone in sandbox
 
 if [ "$#" -gt 0 ]; then
