@@ -1075,7 +1075,7 @@ def create_app(
         if not text.strip():
             return {"summary": "(no content to summarize)"}
         body = json.dumps({
-            "model": "default",
+            "model": os.getenv("SUMMARIZE_MODEL", "gemini-2.5-flash"),
             "messages": [
                 {
                     "role": "system",
@@ -1105,15 +1105,63 @@ def create_app(
 
     # Model for /compact: configurable via COMPACT_MODEL env var.
     # Set to a Gemini Flash model ID in LiteLLM when a key is available.
-    _compact_model = os.getenv("COMPACT_MODEL", "default")
+    _compact_model = os.getenv("COMPACT_MODEL", "gemini-2.5-flash")
+
+    # Compaction prompt based on Anthropic's cookbook (SESSION_MEMORY_PROMPT).
+    # Structured sections, analysis step, explicit preserve/compression rules.
+    _COMPACT_SYSTEM_PROMPT = (
+        "You are compacting an AI agent's conversation context. The agent will lose "
+        "all messages except this summary. Optimize for the agent's ability to continue "
+        "working, not human readability.\n\n"
+        "Before generating your summary, analyze the transcript:\n"
+        "1. What was the agent's objective?\n"
+        "2. What actions succeeded? What failed and why?\n"
+        "3. What was actively being worked on at the end?\n"
+        "4. What tasks remain incomplete or pending?\n"
+        "5. What specific details (IDs, paths, values, URLs) must survive compression?\n\n"
+        "Then produce a structured summary with these sections:\n\n"
+        "## Objective\n"
+        "The agent's goal and any refinements discovered during work.\n\n"
+        "## Completed Work\n"
+        "Actions successfully performed. Be specific:\n"
+        "- What was created, modified, or deleted\n"
+        "- Exact identifiers (file paths, URLs, provider names)\n"
+        "- Specific values, configurations, or settings applied\n\n"
+        "## Errors & Corrections\n"
+        "- Problems encountered and how they were resolved\n"
+        "- Approaches that failed (so they aren't retried)\n"
+        "- Dead ends and why they didn't work\n\n"
+        "## Active Work\n"
+        "What was in progress when the session was compacted. Include:\n"
+        "- The specific task being performed\n"
+        "- Any partial results or intermediate state\n\n"
+        "## Pending Tasks\n"
+        "Remaining items that haven't been started.\n\n"
+        "## Key References\n"
+        "Important details needed to continue:\n"
+        "- Identifiers: file paths, URLs, API endpoints, provider names\n"
+        "- Values: pricing, budget, configurations discovered\n"
+        "- Context: constraints, preferences, technical requirements\n\n"
+        "PRESERVE RULES — always preserve when present:\n"
+        "- Exact file paths, URLs, API endpoints\n"
+        "- Error messages verbatim\n"
+        "- Provider names and pricing discovered\n"
+        "- Budget state and spend tracking\n\n"
+        "COMPRESSION RULES:\n"
+        "- Weight recent messages more heavily\n"
+        "- Omit filler and acknowledgments\n"
+        "- If you must cut details, priority order: errors > active work > "
+        "completed work > background context\n"
+        "- Keep each section concise but complete"
+    )
 
     @app.post("/compact")
     def compact(payload: dict[str, Any]) -> dict[str, Any]:
         """LLM-powered context compaction for agent sessions.
 
-        Accepts full conversation text (no artificial input cap) and returns
-        a thorough summary preserving key details. Uses a dedicated model
-        (configurable via COMPACT_MODEL env var, defaults to primary model).
+        Uses the Anthropic cookbook structured compaction prompt with analysis
+        step, section headers, and explicit preserve/compression rules.
+        Model configurable via COMPACT_MODEL env var.
         Cost tracked separately from agent budget.
         """
         text = str(payload.get("text", ""))
@@ -1123,21 +1171,7 @@ def create_app(
         body = json.dumps({
             "model": _compact_model,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are compacting an AI agent's conversation context. "
-                        "The agent will lose all messages except this summary. "
-                        "Be thorough and preserve:\n"
-                        "- Key findings, decisions, and conclusions reached\n"
-                        "- Current strategy and active approach\n"
-                        "- Specific names, file paths, URLs, and technical details\n"
-                        "- What worked and what failed (with specifics)\n"
-                        "- Unresolved issues and open questions\n"
-                        "- Clear next steps the agent should take\n\n"
-                        "Write in a structured format the agent can act on immediately."
-                    ),
-                },
+                {"role": "system", "content": _COMPACT_SYSTEM_PROMPT},
                 {"role": "user", "content": f"Compact this agent session:\n\n{text}"},
             ],
             "max_tokens": max_tokens,
