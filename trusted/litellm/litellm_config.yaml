@@ -88,6 +88,12 @@ model_list:
       model: "openrouter/anthropic/claude-opus-4.6"
       api_key: "os.environ/OPENROUTER_API_KEY"
 
+  # === OPERATOR-PROVISIONED (free tiers) ===
+  - model_name: "llama-3.3-70b-versatile"    # Groq free tier: 1000 req/day
+    litellm_params:
+      model: "groq/llama-3.3-70b-versatile"
+      api_key: "os.environ/GROQ_API_KEY"
+
 litellm_settings:
   callbacks: ["webhook"]
   max_budget: 5.0
