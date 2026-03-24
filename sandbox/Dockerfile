@@ -28,9 +28,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir playwright requests httpx beautifulsoup4 lxml \
     && playwright install chromium
 
-RUN mkdir -p /workspace/agent /opt/supervisor /var/lib/rsi/backups
+RUN mkdir -p /workspace/agent /opt/supervisor /var/lib/rsi/backups /opt/seed-fallback
 
 WORKDIR /workspace/agent
+
+# Cache-bust arg: pass --build-arg CACHE_BUST=$(date +%s) to ensure
+# COPY picks up the latest seed files instead of serving stale layers.
+ARG CACHE_BUST=1
+
+# Copy seed as fallback for local dev / tests (when GIT_REMOTE_URL is not set).
+# Production containers clone from GitHub at runtime via entrypoint.sh.
+COPY seed/ /opt/seed-fallback/
 
 COPY entrypoint.sh /opt/entrypoint.sh
 

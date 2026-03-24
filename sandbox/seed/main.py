@@ -303,7 +303,9 @@ def execute_tool(name: str, args: dict[str, object]) -> str:
         return truncate_output(output, max_chars=5000)
 
     if name == "request_restart":
-        (WORKSPACE / ".restart_requested").touch()
+        # NOTE: Do NOT touch .restart_requested here. The main loop handles it
+        # AFTER save_conversation() to avoid a race condition where the supervisor
+        # kills us before the conversation is persisted.
         return "OK: restart requested. Supervisor will commit your changes and restart you. Exiting now."
 
     if name == "finish":
@@ -690,19 +692,27 @@ def _call_bridge_compact(text: str) -> str:
 
 
 def _compact_fallback_local(text: str) -> str:
-    """Fallback: use primary model for compaction if bridge is unavailable."""
+    """Fallback: use primary model for compaction if bridge is unavailable.
+
+    Uses Codex CLI's concise handoff prompt — simpler than the full Anthropic
+    cookbook prompt but battle-tested. The bridge /compact endpoint uses the
+    full structured prompt; this fallback is for when the bridge is down.
+    """
     prompt = (
-        "Summarize this AI agent's work session concisely. Preserve:\n"
-        "- Key findings and decisions made\n"
-        "- Current strategy and approach\n"
-        "- Specific names, paths, URLs, and technical details\n"
-        "- What worked and what failed\n"
-        "- Clear next steps\n\n"
-        "Conversation to summarize:\n" + text[:50000]
+        "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff "
+        "summary for another LLM that will resume the task. Include:\n"
+        "- Current progress and key decisions made\n"
+        "- Important context, constraints, or preferences\n"
+        "- What remains to be done (clear next steps)\n"
+        "- Any critical data, file paths, URLs, or references needed to continue\n"
+        "- What failed and should not be retried\n\n"
+        "Be concise, structured, and focused on helping the next LLM seamlessly "
+        "continue the work.\n\n"
+        "Session to compact:\n" + text[:50000]
     )
     try:
         response = chat([
-            {"role": "system", "content": "You are summarizing an AI agent's research session. Be thorough but concise."},
+            {"role": "system", "content": "You are compacting an AI agent's conversation context for handoff."},
             {"role": "user", "content": prompt},
         ])
         return response.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -1173,6 +1183,8 @@ def main() -> int:
                     })
                     save_conversation(messages)
                     print(f"{prefix} conversation saved ({len(messages)} messages) before restart", flush=True)
+                    # NOW write the restart marker — after conversation is safely persisted
+                    (WORKSPACE / ".restart_requested").touch()
                     if _browser_tool is not None:
                         _browser_tool.close()
                         _browser_tool = None

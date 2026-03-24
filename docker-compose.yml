@@ -116,6 +116,7 @@ services:
       RSI_MODEL: ${RSI_MODEL:-default}
       RSI_MAX_TURNS: ${RSI_MAX_TURNS:-0}
       RSI_FREE_TIER_MAX_CALLS: ${RSI_FREE_TIER_MAX_CALLS:-0}
+      GIT_REMOTE_URL: ${GIT_REMOTE_URL:-https://github.com/ashtonleee/rsi-econ-agent-workspace.git}
     volumes:
       - agent-workspace:/workspace/agent
       - ./sandbox/supervisor.py:/opt/supervisor/supervisor.py:ro
