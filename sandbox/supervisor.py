@@ -320,10 +320,10 @@ def launch_agent(after_edit: bool = False) -> int:
             crash_counter = 0
             current_after_edit = bool(commit_result)
             if commit_result:
-                # Get diff stat from bridge for notification
-                diff_resp = _bridge_request("GET", "/git/diff?ref1=HEAD~1&ref2=HEAD")
-                diff_stat = (diff_resp or {}).get("diff", "")[:200] or "unknown changes"
-                write_event("self_edit", f"Self-edited: {diff_stat}")
+                # Get commit hash for notification (bot fetches diff separately)
+                log_resp = _bridge_request("GET", "/git/log")
+                commit_hash = (log_resp or [{}])[0].get("hash", "")[:8] if log_resp else ""
+                write_event("self_edit", f"commit {commit_hash}", {"commit_hash": commit_hash})
             log("RESTART", "agent self-edited, restarting with new code")
             continue
 
