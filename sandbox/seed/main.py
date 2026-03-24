@@ -23,9 +23,9 @@ WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
 
 # Default model from env var (operator controls starting model)
 MODEL = os.getenv("RSI_MODEL", "default")
-# Low budget fallback model
+# Low budget fallback model (disabled by default — agent stays on RSI_MODEL until budget exhaustion)
 LOW_BUDGET_MODEL = os.getenv("RSI_LOW_BUDGET_MODEL", "minimax-m2.7")
-LOW_BUDGET_THRESHOLD = float(os.getenv("RSI_LOW_BUDGET_THRESHOLD", "1.00"))
+LOW_BUDGET_THRESHOLD = float(os.getenv("RSI_LOW_BUDGET_THRESHOLD", "0"))
 
 # Free provider configuration (activated when budget exhausted)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -889,10 +889,8 @@ def main() -> int:
     prefix = f"[agent:{MODEL}]"
     print(f"{prefix} started  ${remaining:.2f} remaining", flush=True)
 
-    # Emergency mode: if budget is very low, just exit
-    if remaining < 0.50:
-        print(f"{prefix} CRITICAL: budget very low, exiting", flush=True)
-        return 0
+    # No hardcoded exit threshold — agent runs until budget exhaustion (429 from LiteLLM)
+    # The agent can self-edit to add an exit threshold if it chooses, but the seed doesn't prescribe one
 
     # Write restart marker to history
     append_history({"event": "restart"})
@@ -907,8 +905,22 @@ def main() -> int:
         # Replace system prompt with fresh one (budget/time may have changed)
         messages[0] = {"role": "system", "content": system_prompt}
 
+        # Compact loaded conversation if it's too large for current model
+        loaded_tokens = estimate_tokens(messages)
+        cfg = COMPACTION_CONFIG
+        window = cfg["context_window"]
+        if loaded_tokens > window * cfg["stage2_trigger"]:
+            print(f"{prefix} loaded conversation too large ({loaded_tokens:,} tokens, {len(messages)} msgs), compacting before resume", flush=True)
+            messages = compact_context_bookend(messages)
+            save_conversation(messages)
+        elif loaded_tokens > window * cfg["stage1_trigger"]:
+            print(f"{prefix} loaded conversation large ({loaded_tokens:,} tokens), masking old tool outputs", flush=True)
+            messages, masked = mask_tool_outputs(messages, len(messages))
+            if masked:
+                save_conversation(messages)
+
         msg_count = len(messages)
-        print(f"{prefix} loaded persisted conversation ({msg_count} messages)", flush=True)
+        print(f"{prefix} loaded persisted conversation ({msg_count} messages, ~{estimate_tokens(messages):,} tokens)", flush=True)
 
         # Append appropriate restart marker
         if is_crash_revert:
