@@ -295,7 +295,10 @@ class GitManager:
         self.seed_dir = seed_dir
         self.stats_dir = stats_dir
         if self.stats_dir:
-            self.stats_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.stats_dir.mkdir(parents=True, exist_ok=True)
+            except PermissionError:
+                self.stats_dir = None
 
     def _run_git(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "GIT_DIR": str(self.repo_dir / ".git"), "GIT_WORK_TREE": str(self.workspace_dir)}
