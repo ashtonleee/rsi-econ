@@ -27,6 +27,7 @@ def load_wallet_api(tmp_path: Path):
     os.environ["GIT_WORKSPACE_DIR"] = str(tmp_path / "workspace")
     os.environ["SEED_DIR"] = str(tmp_path / "seed")
     os.environ["OPERATOR_MESSAGES_DIR"] = str(tmp_path / "operator_messages")
+    os.environ["PROVIDER_PROPOSALS_DIR"] = str(tmp_path / "provider_proposals")
     os.environ["NOTIFICATION_CONFIG_PATH"] = str(tmp_path / "notification_config.json")
     os.environ["EVENTS_DIR"] = str(tmp_path / "events")
     os.environ["EVENT_POLL_INTERVAL"] = "9999"

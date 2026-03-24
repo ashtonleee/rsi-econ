@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,7 +32,7 @@ def cli():
 
 @pytest.fixture()
 def git_repo(tmp_path: Path):
-    """Create a minimal git repo to simulate sandbox/seed with a main branch."""
+    """Create a minimal git repo to simulate the bridge git repo."""
     subprocess.run(["git", "init", str(tmp_path)], capture_output=True, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
@@ -53,10 +56,51 @@ def git_repo(tmp_path: Path):
     return tmp_path
 
 
+@contextmanager
+def mock_docker(cli, git_repo):
+    """Mock Docker functions so session commands use a local git repo."""
+
+    def local_bridge_git(*args):
+        env = {
+            **os.environ,
+            "GIT_DIR": str(git_repo / ".git"),
+            "GIT_WORK_TREE": str(git_repo),
+        }
+        return subprocess.run(
+            ["git", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def noop_sh(script):
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+    def noop_run(cmd, **kw):
+        r = MagicMock()
+        r.returncode = 1
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+    with patch.object(cli, "bridge_git", local_bridge_git), \
+         patch.object(cli, "bridge_sh", noop_sh), \
+         patch.object(cli, "_container_running", return_value=True), \
+         patch.object(cli, "_stop_sandbox"), \
+         patch.object(cli, "_start_sandbox"), \
+         patch.object(cli, "_copy_seed_to_workspace"), \
+         patch.object(cli, "_archive_session", return_value=None), \
+         patch.object(cli, "run", noop_run):
+        yield
+
+
 def test_status_formats_output(cli, git_repo, capsys) -> None:
     """cmd_status prints session info without crashing."""
-    import argparse
-
     cli.SEED_DIR = git_repo
 
     def fake_compose(*args):
@@ -76,18 +120,7 @@ def test_status_formats_output(cli, git_repo, capsys) -> None:
 
 
 def test_new_creates_session_branch(cli, git_repo) -> None:
-    import argparse
-
-    cli.SEED_DIR = git_repo
-
-    def fake_compose(*args):
-        r = MagicMock()
-        r.returncode = 0
-        r.stdout = ""
-        r.stderr = ""
-        return r
-
-    with patch.object(cli, "docker_compose", fake_compose):
+    with mock_docker(cli, git_repo):
         result = cli.cmd_new(argparse.Namespace(name="test1"))
 
     assert result == 0
@@ -100,11 +133,7 @@ def test_new_creates_session_branch(cli, git_repo) -> None:
 
 
 def test_list_shows_session_branches(cli, git_repo, capsys) -> None:
-    import argparse
-
-    cli.SEED_DIR = git_repo
-
-    # Create a session branch
+    # Create a session branch in the test repo
     subprocess.run(
         ["git", "checkout", "-b", "session/demo"],
         cwd=str(git_repo), capture_output=True, check=True,
@@ -116,17 +145,15 @@ def test_list_shows_session_branches(cli, git_repo, capsys) -> None:
         cwd=str(git_repo), capture_output=True, check=True,
     )
 
-    result = cli.cmd_list(argparse.Namespace())
+    with mock_docker(cli, git_repo):
+        result = cli.cmd_list(argparse.Namespace())
+
     assert result == 0
     output = capsys.readouterr().out
     assert "session/demo" in output
 
 
 def test_fork_creates_branch_from_source(cli, git_repo) -> None:
-    import argparse
-
-    cli.SEED_DIR = git_repo
-
     # Create source branch
     subprocess.run(
         ["git", "checkout", "-b", "session/source"],
@@ -139,14 +166,7 @@ def test_fork_creates_branch_from_source(cli, git_repo) -> None:
         cwd=str(git_repo), capture_output=True, check=True,
     )
 
-    def fake_compose(*args):
-        r = MagicMock()
-        r.returncode = 0
-        r.stdout = ""
-        r.stderr = ""
-        return r
-
-    with patch.object(cli, "docker_compose", fake_compose):
+    with mock_docker(cli, git_repo):
         result = cli.cmd_fork(argparse.Namespace(branch="session/source", name="forked1"))
 
     assert result == 0
@@ -159,11 +179,10 @@ def test_fork_creates_branch_from_source(cli, git_repo) -> None:
 
 
 def test_push_fails_without_remote(cli, git_repo, capsys) -> None:
-    import argparse
+    """Push fails when docker cp cannot reach the bridge container."""
+    with mock_docker(cli, git_repo):
+        result = cli.cmd_push(argparse.Namespace())
 
-    cli.SEED_DIR = git_repo
-
-    result = cli.cmd_push(argparse.Namespace())
     assert result == 1
     output = capsys.readouterr().err
-    assert "no 'origin' remote" in output
+    assert "Error" in output

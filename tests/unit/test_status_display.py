@@ -20,18 +20,18 @@ def load_session_cli():
 
 def test_status_formats_budget_bar() -> None:
     cli = load_session_cli()
-    bar_full = cli.budget_bar(95)
+    bar_full = cli._budget_bar(95)
     assert "FULL" in bar_full
     assert "\u2588" in bar_full  # filled block
 
-    bar_low = cli.budget_bar(8)
+    bar_low = cli._budget_bar(8)
     assert "CONSERVE" in bar_low
 
-    bar_critical = cli.budget_bar(3)
+    bar_critical = cli._budget_bar(3)
     assert "WRAPUP" in bar_critical
 
 
 def test_budget_bar_moderate() -> None:
     cli = load_session_cli()
-    bar = cli.budget_bar(35)
+    bar = cli._budget_bar(35)
     assert "MODERATE" in bar
