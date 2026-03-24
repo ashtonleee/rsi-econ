@@ -519,7 +519,7 @@ def main() -> int:
     system_prompt = build_system_prompt(wallet)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Begin working toward your objective. Use tools to take action.\nCurrent time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"},
+        {"role": "user", "content": f"New session. Current time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"},
     ]
 
     # Load compaction summary for cross-session memory
@@ -719,7 +719,7 @@ def main() -> int:
                 print(f"{prefix} 3 consecutive empty responses, exiting", flush=True)
                 break
             print(f"{prefix} empty response #{empty_count}, nudging", flush=True)
-            messages.append({"role": "user", "content": "Continue working toward your objective. Use tools to take action."})
+            messages.append({"role": "user", "content": "Empty response. Take a concrete action."})
             continue
 
     # Clean up browser before exit
