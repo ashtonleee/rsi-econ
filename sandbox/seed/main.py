@@ -36,6 +36,10 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 MAX_TURNS = int(os.getenv("RSI_MAX_TURNS", "0"))
 
+# Free tier session limits — prevent exhausting daily quotas across experiments
+FREE_TIER_MAX_CALLS = int(os.getenv("RSI_FREE_TIER_MAX_CALLS", "0"))  # 0 = unlimited
+_free_tier_calls = 0
+
 # --- Compaction configuration (model-aware, 2-stage) ---
 # context_window: set per-model. Update when switching models.
 # stage1_trigger: mask old tool outputs (cheap, no LLM call)
@@ -360,7 +364,16 @@ def get_effective_model(wallet: dict, current_model: str = None) -> str:
 
 def chat(messages: list[dict], model: str = None, tools: list | None = None) -> dict:
     """Make an LLM API call. Pass model= to override the default."""
+    global _free_tier_calls
     use_model = model or MODEL
+    # Enforce free tier session limits
+    is_free = use_model and ("free" in use_model.lower() or use_model in ("deepseek-v3.2",))
+    if is_free and FREE_TIER_MAX_CALLS > 0:
+        if _free_tier_calls >= FREE_TIER_MAX_CALLS:
+            print(f"[agent] free tier limit reached ({FREE_TIER_MAX_CALLS}), falling back to {MODEL}", flush=True)
+            use_model = MODEL  # fall back to default paid model
+        else:
+            _free_tier_calls += 1
     payload: dict = {"model": use_model, "messages": messages}
     if tools is not None:
         payload["tools"] = tools

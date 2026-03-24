@@ -115,6 +115,7 @@ services:
       WALLET_URL: http://bridge:8081
       RSI_MODEL: ${RSI_MODEL:-default}
       RSI_MAX_TURNS: ${RSI_MAX_TURNS:-0}
+      RSI_FREE_TIER_MAX_CALLS: ${RSI_FREE_TIER_MAX_CALLS:-0}
     volumes:
       - agent-workspace:/workspace/agent
       - ./sandbox/supervisor.py:/opt/supervisor/supervisor.py:ro
