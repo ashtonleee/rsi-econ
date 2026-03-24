@@ -363,7 +363,8 @@ def build_evolution_embed(
         inline=True,
     )
 
-    if diff_text:
+    if diff_text and not llm_summary:
+        # Only show raw diff if LLM summary failed
         truncated = diff_text[:500]
         if len(diff_text) > 500:
             truncated += "\n... (truncated)"
@@ -646,7 +647,7 @@ class RSIBot(discord.Client):
 
         llm_summary = ""
         if diff_text:
-            prompt = "Summarize this code change in one sentence. What was changed and why?"
+            prompt = "Summarize this code change in 2-3 sentences for a human operator. What files changed, what was the purpose, and what's the impact? Be specific about function names and behaviors, not just 'updated code.'"
             result = bridge_post("/summarize", {
                 "text": f"{prompt}\n\n{diff_text[:3000]}",
                 "max_tokens": 200,
