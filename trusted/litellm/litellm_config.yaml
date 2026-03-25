@@ -3,14 +3,26 @@ model_list:
     litellm_params:
       model: "openrouter/minimax/minimax-m2.7"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          order: ["Novita"]
+          allow_fallbacks: true
   - model_name: "minimax-m2.7"
     litellm_params:
       model: "openrouter/minimax/minimax-m2.7"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          order: ["Novita"]
+          allow_fallbacks: true
   # --- DYNAMIC MODELS (Pareto frontier, March 2026) ---
   # Scores from Artificial Analysis Intelligence Index. Pricing: input/output per 1M tokens.
   #
+  # Provider pinning: ensures requests hit the same backend for prefix caching.
+  # See docs/PREFIX_CACHING_REPORT.md for test results and measured savings.
+  #
   # === FREE TIER (AA scores 36-38) ===
+  # Free models left unpinned — free tier routing may not support provider preferences.
   - model_name: "step-3.5-flash-free"        # AA:38 | FREE | 256K ctx
     litellm_params:
       model: "openrouter/stepfun/step-3.5-flash:free"
@@ -33,60 +45,108 @@ model_list:
     litellm_params:
       model: "openrouter/meta-llama/llama-4-scout"
       api_key: "os.environ/OPENROUTER_API_KEY"
-  - model_name: "gpt-4.1-nano"                # $0.10/$0.40 | 1M ctx
+  - model_name: "gpt-4.1-nano"                # $0.10/$0.40 | 1M ctx | cached: 75% off
     litellm_params:
       model: "openrouter/openai/gpt-4.1-nano"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          order: ["OpenAI"]
+          allow_fallbacks: true
   - model_name: "llama-4-maverick"             # $0.15/$0.60 | 1M ctx
     litellm_params:
       model: "openrouter/meta-llama/llama-4-maverick"
       api_key: "os.environ/OPENROUTER_API_KEY"
   #
   # === CHEAP ($0.20-$1.00/M input) ===
-  - model_name: "gpt-5.4-nano"                # AA:44 | $0.20/$1.25 | 400K ctx
+  - model_name: "gpt-5.4-nano"                # AA:44 | $0.20/$1.25 | 400K ctx | cached: 90% off
     litellm_params:
       model: "openrouter/openai/gpt-5.4-nano"
       api_key: "os.environ/OPENROUTER_API_KEY"
-  - model_name: "deepseek-v3.2"               # AA:42 | $0.26/$0.38 | 163K ctx — best $/quality
+      extra_body:
+        provider:
+          order: ["OpenAI"]
+          allow_fallbacks: true
+  - model_name: "deepseek-v3.2"               # AA:42 | $0.26/$0.38 | 163K ctx — best $/quality | cached: 90% off
     litellm_params:
       model: "openrouter/deepseek/deepseek-v3.2"
       api_key: "os.environ/OPENROUTER_API_KEY"
-  - model_name: "gemini-2.5-flash"            # $0.30/$2.50 | 1M ctx
+      extra_body:
+        provider:
+          order: ["DeepSeek"]
+          allow_fallbacks: true
+  - model_name: "gemini-2.5-flash"            # $0.30/$2.50 | 1M ctx | no prefix caching via OpenRouter
     litellm_params:
       model: "openrouter/google/gemini-2.5-flash"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          order: ["Google"]
+          allow_fallbacks: true
   - model_name: "kimi-k2.5"                   # AA:47 | $0.45/$2.20 | 262K ctx
     litellm_params:
       model: "openrouter/moonshotai/kimi-k2.5"
       api_key: "os.environ/OPENROUTER_API_KEY"
-  - model_name: "glm-5"                       # AA:50 | $0.72/$2.30 | 80K ctx
+      extra_body:
+        provider:
+          order: ["Moonshot"]
+          allow_fallbacks: true
+  - model_name: "glm-5"                       # AA:50 | $0.72/$2.30 | 80K ctx | cached: 78% off (inconsistent)
     litellm_params:
       model: "openrouter/z-ai/glm-5"
       api_key: "os.environ/OPENROUTER_API_KEY"
-  - model_name: "gpt-5.4-mini"                # AA:48 | $0.75/$4.50 | 400K ctx
+      extra_body:
+        provider:
+          order: ["Z-AI"]
+          allow_fallbacks: true
+  - model_name: "gpt-5.4-mini"                # AA:48 | $0.75/$4.50 | 400K ctx | cached: 90% off
     litellm_params:
       model: "openrouter/openai/gpt-5.4-mini"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          order: ["OpenAI"]
+          allow_fallbacks: true
   #
   # === MID ($1-$5/M input) ===
-  - model_name: "gemini-3.1-pro"              # AA:57 | $2.00/$12.00 | 1M ctx — #1 quality
+  - model_name: "gemini-3.1-pro"              # AA:57 | $2.00/$12.00 | 1M ctx — #1 quality | no prefix caching via OpenRouter
     litellm_params:
       model: "openrouter/google/gemini-3.1-pro-preview"
       api_key: "os.environ/OPENROUTER_API_KEY"
-  - model_name: "gpt-5.4"                     # AA:57 | $2.50/$15.00 | 1M ctx — #1 quality (tied)
+      extra_body:
+        provider:
+          order: ["Google"]
+          allow_fallbacks: true
+  - model_name: "gpt-5.4"                     # AA:57 | $2.50/$15.00 | 1M ctx — #1 quality (tied) | cached: 90% off
     litellm_params:
       model: "openrouter/openai/gpt-5.4"
       api_key: "os.environ/OPENROUTER_API_KEY"
-  - model_name: "claude-sonnet-4.6"           # AA:44-52 | $3.00/$15.00 | 1M ctx
+      extra_body:
+        provider:
+          order: ["OpenAI"]
+          allow_fallbacks: true
+  - model_name: "claude-sonnet-4.6"           # AA:44-52 | $3.00/$15.00 | 1M ctx | cached: 90% off (requires cache_control)
     litellm_params:
       model: "openrouter/anthropic/claude-sonnet-4.6"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          order: ["Anthropic"]
+          allow_fallbacks: true
+        cache_control:
+          type: "ephemeral"
   #
   # === FRONTIER ($5+/M input) ===
-  - model_name: "claude-opus-4.6"             # AA:53 | $5.00/$25.00 | 1M ctx
+  - model_name: "claude-opus-4.6"             # AA:53 | $5.00/$25.00 | 1M ctx | cached: 90% off (requires cache_control)
     litellm_params:
       model: "openrouter/anthropic/claude-opus-4.6"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          order: ["Anthropic"]
+          allow_fallbacks: true
+        cache_control:
+          type: "ephemeral"
 
   # === OPERATOR-PROVISIONED (free tiers) ===
   - model_name: "llama-3.3-70b-versatile"    # Groq free tier: 1000 req/day
