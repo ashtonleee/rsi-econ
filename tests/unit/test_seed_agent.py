@@ -229,9 +229,9 @@ def test_low_budget_exits_immediately(tmp_path: Path, monkeypatch) -> None:
 def test_tool_definitions_include_expected_tools(tmp_path: Path) -> None:
     module = load_seed_agent(tmp_path)
     tool_names = {t["function"]["name"] for t in module.TOOLS}
-    # finish tool removed; 9 tools remain
+    # finish tool removed; 10 tools remain
     expected = {"shell", "read_file", "write_file", "edit_file", "grep",
-                "request_restart", "web_search", "browse_url", "screenshot"}
+                "request_restart", "web_search", "browse_url", "fetch_url", "screenshot"}
     assert tool_names == expected
 
 

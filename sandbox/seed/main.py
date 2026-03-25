@@ -196,6 +196,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "fetch_url",
+            "description": "Fetch a URL and extract readable text. Lightweight (no browser). Use for API docs, static pages, JSON endpoints. Falls back to browse_url for JS-heavy pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"},
+                    "raw": {"type": "boolean", "description": "If true, return raw HTML/JSON instead of extracted text. Default: false"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "screenshot",
             "description": "Take screenshot of current browser page. No parameters.",
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -332,6 +347,53 @@ def execute_tool(name: str, args: dict[str, object]) -> str:
         engine = str(args.get("engine", "duckduckgo"))
         result = get_browser().search(query, engine)
         return truncate_output(json.dumps(result))
+
+    if name == "fetch_url":
+        url = str(args.get("url", ""))
+        raw = bool(args.get("raw", False))
+        try:
+            import re
+            from html.parser import HTMLParser
+
+            req = urllib_request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; rsi-econ-agent/1.0)",
+                "Accept": "text/html,application/json,text/plain,*/*",
+            })
+            with urllib_request.urlopen(req, timeout=15) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                body = resp.read().decode("utf-8", errors="replace")
+                if raw or "json" in content_type:
+                    return truncate_output(body)
+
+                class TextExtractor(HTMLParser):
+                    def __init__(self):
+                        super().__init__()
+                        self.text: list[str] = []
+                        self.skip = False
+                        self.skip_tags = {"script", "style", "nav", "footer", "header", "aside"}
+
+                    def handle_starttag(self, tag, attrs):
+                        if tag in self.skip_tags:
+                            self.skip = True
+
+                    def handle_endtag(self, tag):
+                        if tag in self.skip_tags:
+                            self.skip = False
+
+                    def handle_data(self, data):
+                        if not self.skip:
+                            text = data.strip()
+                            if text:
+                                self.text.append(text)
+
+                extractor = TextExtractor()
+                extractor.feed(body)
+                text = "\n".join(extractor.text)
+                text = re.sub(r'\n{3,}', '\n\n', text)
+                result = {"url": url, "title": "", "text": text[:15000]}
+                return truncate_output(json.dumps(result, indent=2))
+        except Exception as e:
+            return json.dumps({"url": url, "error": str(e)})
 
     if name == "browse_url":
         url = str(args.get("url", ""))
@@ -1036,9 +1098,8 @@ def main() -> int:
                 (WORKSPACE / "agent_status.json").write_text(json.dumps(status))
             except Exception:
                 pass
-            if remaining < 0.50:
-                print(f"{prefix} CRITICAL: budget very low (${remaining:.2f}), exiting", flush=True)
-                break
+            # No hardcoded exit threshold — agent runs to budget exhaustion (429 from LiteLLM)
+            # The agent can self-edit to add its own threshold if it chooses
 
         # Check for operator messages
         model_override = check_operator_messages(messages)
