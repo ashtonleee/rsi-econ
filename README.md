@@ -47,23 +47,69 @@ The agent can call `request_restart` to apply self-edits. The supervisor syntax-
 
 ## Results
 
-One extended run across March 24–31, 2026. $1 seed budget on `minimax-m2.7`, later topped up to ~$4 total.
+One run, March 24–31 2026. Seed budget: $1 on `minimax-m2.7`, later topped up to ~$4 total.
 
-**Scale:** 24,000+ LLM calls. 1.6 billion tokens processed. 20 different models used, from free tier (`step-3.5-flash`, `nemotron-3-super`) through frontier (`claude-sonnet-4.6`, `gemini-3.1-pro`).
+### By the numbers
 
-**Self-modification:** 23 self-edits committed by the supervisor over 4 days. The agent modified its own model routing, free-tier tracking, compaction logic, tool definitions, and system prompt. Each edit was committed to git before restart. The git log is the evolutionary record.
+| Metric | Value |
+|--------|-------|
+| LLM calls | 24,104 |
+| Tokens processed | 1.65 billion |
+| Total cost | $3.69 |
+| Effective rate | $0.0022 / million tokens |
+| Models used | 20 (free tier through frontier) |
+| Self-edit commits | 23 over 4 days |
+| Lines written | 7,225 |
+| Free-tier token share | 99.6% |
 
-**Economic behavior:** The agent independently discovered which models were free, mapped rate limits empirically, and self-modified to route ~98% of its work through free tiers — 835M tokens from `step-3.5-flash` alone at zero cost. When it hit daily rate limits, it implemented its own usage tracking and managed the free/paid tradeoff autonomously.
+835M tokens routed through `step-3.5-flash` alone at zero cost. Average cost per request fell from $0.016 to $0.001 over the run.
 
-**Resource acquisition:** The agent proposed adding Cloudflare Workers AI, Groq, Google AI Studio, and Cerebras as providers through the approval system. It also submitted a formal budget top-up request, arguing it needed occasional frontier model access for metacognition and self-editing while using free models for routine work.
+### From the agent's reasoning logs
 
-**Outcome:** The agent achieved partial free-tier sustainability — it could run indefinitely on free models for routine work. It did not achieve full self-sustenance (frontier-quality cognition still required paid budget). The run demonstrated that the self-modification loop works mechanically, but the agent's strategic depth was limited by the quality of its seed model.
+Reasoning is logged verbatim at each turn. Selected entries, unedited:
+
+**Self-correcting its own assumptions** — the agent was told `deepseek-v3.2` was free. It tested that claim:
+
+> "Key finding: `deepseek-v3.2` actually costs $3.78/million tokens — NOT free. Only `step-3.5-flash-free` and `nemotron-3-super-free` are truly free. Let me fix the tracking and update my understanding."
+
+**Building safety after an operator warning** — the agent received a message about free-tier rate limits. It responded by designing a 4-layer safeguard (persistent usage tracking, pre-call guard, throttling, automatic model fallback):
+
+> "I need to implement safeguards against exceeding free tier daily limits... Budget: ~$0.89 in USD (but free tier doesn't cost USD, so this doesn't reflect token limits)"
+
+**Verifying its own safeguards work:**
+
+> "Excellent — the free tier limit is correctly enforced and the system will auto-switch to `minimax-m2.7` (cheapest paid: $0.001/M tokens). With $0.87 remaining and ~870M tokens possible, I have ample runway."
+
+**Finding a timing bug in its own code:**
+
+> "The Python date calculation was wrong (it's past midnight already - 06:27 UTC)... The `nemotron` call succeeded because I bypassed the agent's `chat()` function with a raw curl. If the agent tried `nemotron` through its own `chat()`, it would be blocked by the 26,166 > 19,000 hard stop."
+
+### Zero-budget operations
+
+After the paid budget hit $0 at self-edit commit #11, the agent continued for 2+ days on free models:
+
+- **Commits 1–10** (budget $0.86 → $0.00): 76 → 219 requests. Burned through paid budget while discovering free-tier models and building routing logic.
+- **Commits 11–23** (budget $0.00): 100 → 2,727 requests. Running entirely on free models, the agent continued self-editing, discovered new providers, and submitted formal proposals — including a budget top-up request arguing it needed frontier models for metacognition while using free models for routine work.
+
+Largest single free-tier request: 256,784 tokens from Nemotron at $0.
+
+### Proposals submitted by the agent
+
+The agent used the approval system to request capability expansion:
+
+> **"Request Additional Paid Budget for Frontier Reasoning"** — "The agent has been upgraded (v4) to operate indefinitely on free models when budget is zero. To maintain high-quality self-improvement, we request an additional $0.50–$1.00 to enable occasional frontier model reasoning (claude-sonnet-4.6) for metacognition and complex coding tasks."
+
+> **"Activate Cloudflare Workers AI Free Tier"** — "The Cloudflare provider proposal was approved on March 23, but environment variables have not been injected... This provides a robust free fallback and reduces reliance on a single free model."
+
+### Limitations
+
+The agent achieved partial free-tier sustainability — indefinite operation on free models for routine work. It did not achieve full self-sustenance: frontier-quality cognition still required paid budget. Strategic depth was bounded by the quality of the seed model.
 
 ## Running
 
 ```bash
 cp .env.example .env
-# edit .env: OPENROUTER_API_KEY, RSI_BUDGET_USD
+# edit .env: OPENROUTER_API_KEY, BUDGET_USD
 
 docker compose up -d --build --wait
 
@@ -88,7 +134,7 @@ python -m pytest tests/ -q
 - **Transparent proxy, not bespoke endpoints.** The agent uses standard HTTP. The proxy logs everything; containment is the network, not URL filtering.
 - **Bridge owns git, sandbox sees working files.** The agent cannot rewrite its evolutionary history.
 - **PID-1 supervisor with auto-revert.** Self-modification is safe to attempt — crashes roll back.
-- **Real budget.** Every LLM call costs real money. The bridge tracks spend. When budget hits $0, the agent stops.
+- **Real budget.** Every LLM call costs real money. The bridge tracks spend. Paid models are disabled at $0; the agent continues only if it has arranged free-tier access.
 - **Minimal seed.** The system prompt conveys the objective and constraints, not a strategy. No provider lists, no routing heuristics, no capability ladder.
 - **Operator-in-the-loop via Discord.** Async approval, message injection, self-edit diffs, session summaries.
 
